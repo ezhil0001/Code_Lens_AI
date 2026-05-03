@@ -1,0 +1,6 @@
+"""Placeholder for standalone scripts"""
+
+# This directory will contain:
+# - ingest_repository.py: Script to ingest GitHub repositories
+# - test_chains.py: Script to test LangChain pipelines
+# - seed_data.py: Script to seed initial data

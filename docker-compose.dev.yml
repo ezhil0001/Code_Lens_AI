@@ -1,0 +1,176 @@
+version: '3.8'
+
+# ============================================================================
+# CodeLens_AI: Development Environment (Quick Setup)
+# ============================================================================
+# One-command setup for all external services
+# Usage: docker-compose -f docker-compose.dev.yml up
+# ============================================================================
+
+services:
+  # PostgreSQL 13 with pgVector extension
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: codelens_postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-codelens}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-codelens_secure_pass}
+      POSTGRES_DB: ${DB_NAME:-codelens_db}
+      POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=vector"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-codelens} -d ${DB_NAME:-codelens_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - codelens_network
+
+  # ChromaDB Vector Database (REST API)
+  chromadb:
+    image: ghcr.io/chroma-core/chroma:0.4.24
+    container_name: codelens_chromadb
+    environment:
+      PERSIST_DIRECTORY: /chroma_data
+      CHROMA_SERVER_AUTH_PROVIDER: "token"
+      CHROMA_SERVER_AUTH_CREDENTIALS: ${CHROMA_API_KEY:-changeme_chroma_key_123}
+    ports:
+      - "8001:8000"  # Note: ChromaDB runs on port 8000 internally, expose as 8001
+    volumes:
+      - chromadb_data:/chroma_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - codelens_network
+
+  # Redis Cache (Optional but recommended)
+  redis:
+    image: redis:7-alpine
+    container_name: codelens_redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secure_pass}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - codelens_network
+
+  # Jaeger Tracing (OpenTelemetry backend)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: codelens_jaeger
+    ports:
+      - "6831:6831/udp"  # Jaeger agent
+      - "16686:16686"    # Jaeger UI
+    environment:
+      COLLECTOR_ZIPKIN_HOST_PORT: ":9411"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:16686/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - codelens_network
+
+  # Optional: Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: codelens_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./alert-rules.yml:/etc/prometheus/alert-rules.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - codelens_network
+
+  # Optional: Grafana Dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: codelens_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_INSTALL_PLUGINS: "grafana-piechart-panel"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+    networks:
+      - codelens_network
+
+# ============================================================================
+# NETWORKS & VOLUMES
+# ============================================================================
+
+networks:
+  codelens_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  chromadb_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+# ============================================================================
+# QUICK START
+# ============================================================================
+# 1. Create .env file with required credentials:
+#    DATABASE_URL=postgresql://codelens:codelens_secure_pass@postgres:5432/codelens_db
+#    CHROMA_HOST=chromadb
+#    CHROMA_PORT=8000
+#    REDIS_URL=redis://:redis_secure_pass@redis:6379/0
+#    JAEGER_AGENT_HOST=jaeger
+#    JAEGER_AGENT_PORT=6831
+#
+# 2. Start all services:
+#    docker-compose -f docker-compose.dev.yml up -d
+#
+# 3. Verify services:
+#    docker-compose -f docker-compose.dev.yml ps
+#
+# 4. Check logs:
+#    docker-compose -f docker-compose.dev.yml logs -f postgres    # PostgreSQL
+#    docker-compose -f docker-compose.dev.yml logs -f chromadb    # ChromaDB
+#    docker-compose -f docker-compose.dev.yml logs -f redis       # Redis
+#
+# 5. Stop services:
+#    docker-compose -f docker-compose.dev.yml down
+#
+# 6. Full reset (warning: deletes all data):
+#    docker-compose -f docker-compose.dev.yml down -v
+#
+# ============================================================================
+# SERVICE ENDPOINTS
+# ============================================================================
+# PostgreSQL:     localhost:5432 (user: codelens, password: see .env)
+# ChromaDB:       http://localhost:8001 (API key: see .env)
+# Redis:          localhost:6379 (password: see .env)
+# Jaeger:         http://localhost:16686 (trace visualization)
+# Prometheus:     http://localhost:9090 (metrics)
+# Grafana:        http://localhost:3000 (dashboards, admin/admin123)
+#
+# ============================================================================

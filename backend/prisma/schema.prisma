@@ -1,0 +1,167 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-py"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ===================================
+// Users (Alhena Pattern)
+// ===================================
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  firstName String?
+  lastName  String?
+  
+  // Session Management (Alhena Multi-Device Prevention)
+  isLoggedIn      Boolean   @default(false)
+  loginId         String?   @unique // "login-{timestamp}" format for device tracking
+  refreshToken    String?   // Stored directly in User (Alhena pattern)
+  
+  // Role
+  roleId    String
+  
+  // Audit Fields
+  isAdmin        Boolean   @default(false)
+  lastLoginAt    DateTime?
+  lastLoginIp    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime? // Soft delete support
+  
+  // Relations
+  role           Role         @relation(fields: [roleId], references: [id])
+  auditLogs      AuditLog[]
+  
+  @@index([email])
+  @@index([loginId])
+  @@map("users")
+}
+
+// ===================================
+// Roles (RBAC - Role-Based Access Control)
+// ===================================
+model Role {
+  id    String   @id @default(cuid())
+  name  String   @unique
+  
+  // Relations
+  users        User[]
+  permissions  Permission[]
+  
+  @@index([name])
+  @@map("roles")
+}
+
+// ===================================
+// Permissions
+// ===================================
+model Permission {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  
+  // Relations
+  roles Role[]
+  
+  @@map("permissions")
+}
+
+// ===================================
+// Audit Logs (Security & Compliance)
+// ===================================
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String   // e.g., "LOGIN", "LOGOUT", "CREATE_USER", "UPDATE_ROLE"
+  resource  String   // e.g., "user", "role", "api_key"
+  resourceId String? // ID of the resource affected
+  
+  // Request Information
+  ipAddress    String?
+  userAgent    String?
+  httpMethod   String?
+  endpoint     String?
+  
+  // Change Details
+  oldValue  String? // JSON stringified
+  newValue  String? // JSON stringified
+  changes   String? // JSON stringified - detailed changes
+  
+  // Status
+  status    String  @default("SUCCESS") // SUCCESS, FAILURE
+  errorMsg  String?
+  
+  // Timestamp
+  createdAt DateTime @default(now())
+  
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([action])
+  @@index([resource])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ===================================
+// Chat History (For conversation tracking)
+// ===================================
+model ChatMessage {
+  id          String   @id @default(cuid())
+  userId      String
+  
+  // Message Content
+  role        String   // "user" or "assistant"
+  content     String
+  tokens      Int?     // Token count
+  
+  // Context
+  codeContext String?  // IDs of related code chunks (JSON)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Soft delete
+  deletedAt   DateTime?
+  
+  @@index([userId])
+  @@index([createdAt])
+  @@map("chat_messages")
+}
+
+// ===================================
+// Sessions (For real-time tracking)
+// ===================================
+model Session {
+  id            String   @id @default(cuid())
+  userId        String
+  
+  // Session Info
+  sessionToken  String   @unique
+  loginId       String   // Links to User.loginId for multi-device prevention
+  
+  // Device Info
+  userAgent     String?
+  ipAddress     String?
+  
+  // Expiration
+  expiresAt     DateTime
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([sessionToken])
+  @@index([loginId])
+  @@map("sessions")
+}

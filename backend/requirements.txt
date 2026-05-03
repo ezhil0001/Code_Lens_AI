@@ -1,0 +1,133 @@
+# ==================== Web Framework ====================
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# ==================== Logging ====================
+loguru>=0.7.2
+
+# ==================== Database ====================
+sqlalchemy>=2.0.23
+alembic>=1.12.1
+psycopg2-binary>=2.9.9
+pgvector>=0.2.4
+
+# ==================== Authentication & Security ====================
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+# Pin bcrypt < 4.1 — passlib 1.7.4 introspects bcrypt.__about__.__version__
+# which was removed in bcrypt 4.1+, producing a noisy (but harmless) warning.
+bcrypt>=4.0.1,<4.1
+python-dotenv>=1.0.0
+
+# ==================== Data Validation ====================
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+email-validator>=2.1.0
+
+# ==================== AI & LLM ====================
+langchain>=0.1.7
+langchain-community>=0.0.20
+langchain-openai>=0.1.0
+langchain-groq>=0.1.2
+langchain-huggingface>=0.0.39
+langchain-text-splitters>=0.0.1
+langchain-chroma>=0.1.0
+
+# ==================== Vector Store ====================
+chromadb>=0.4.14
+sentence-transformers>=2.2.2
+huggingface-hub>=0.19.4
+
+# ==================== Document Processing ====================
+pypdf>=3.17.1
+pdf2image>=1.16.3
+pdfplumber>=0.10.3
+
+# ==================== Utilities ====================
+python-dateutil>=2.8.2
+pytz>=2023.3
+openai>=1.3.8
+tiktoken>=0.5.1
+rank-bm25>=0.2.2
+ragas>=0.1.1
+datasets>=2.14.5
+tavily-python>=0.3.0
+requests>=2.31.0
+aiohttp>=3.9.1
+httpx>=0.25.1
+pandas>=2.0.0
+GitPython>=3.1.32
+beautifulsoup4>=4.12.0
+lark>=1.1.5
+python-json-logger>=2.0.7
+prometheus-client>=0.19.0
+
+# ==================== Testing ====================
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
+pytest-cov>=4.1.0
+
+# ==================== Development ====================
+black>=23.12.0
+flake8>=6.1.0
+mypy>=1.7.1
+isort>=5.13.2
+
+# ==================== DevOps ====================
+gunicorn>=21.2.0
+docker>=7.0.0
+
+# Phase 2: Hybrid Retrieval Engine with Reranking
+# ================================================
+
+# LangChain and integrations
+langchain>=0.1.0
+langchain-chroma>=0.1.0
+langchain-openai>=0.0.1
+langchain-core>=0.1.0
+
+# Information Retrieval
+rank-bm25>=0.2.2  # BM25 lexical search
+
+# Reranking
+flashrank>=0.2.0  # Fast reranking backend (optional but recommended)
+
+# Embeddings and Semantic Search
+sentence-transformers>=2.2.2  # For embeddings and cross-encoding
+torch>=2.0.0  # Required by sentence-transformers
+
+# Vector Store
+chromadb>=0.4.21  # Already in requirements, used for vector storage
+hnswlib>=0.7.0  # HNSW for efficient similarity search
+
+# Utilities
+tenacity>=8.2.0  # For retry logic
+tqdm>=4.65.0  # Progress bars
+
+# ==================== Phase 5: OpenTelemetry & Observability ====================
+
+# OpenTelemetry Core
+opentelemetry-api>=1.21.0
+opentelemetry-sdk>=1.21.0
+opentelemetry-exporter-jaeger>=1.21.0  # Jaeger tracing backend
+opentelemetry-exporter-prometheus>=0.42b0  # Prometheus metrics export
+
+# OpenTelemetry Instrumentation
+opentelemetry-instrumentation>=0.42b0
+opentelemetry-instrumentation-fastapi>=0.42b0  # FastAPI auto-instrumentation
+opentelemetry-instrumentation-sqlalchemy>=0.42b0  # Database query tracing
+opentelemetry-instrumentation-psycopg2>=0.42b0  # PostgreSQL-specific instrumentation
+opentelemetry-instrumentation-httpx>=0.42b0  # HTTPX client instrumentation
+opentelemetry-instrumentation-requests>=0.42b0  # Requests library instrumentation
+
+# RAG Evaluation (Ragas)
+ragas>=0.1.1  # RAG evaluation framework (already in requirements, confirmed version)
+datasets>=2.14.5  # Hugging Face datasets (already in requirements, confirmed version)
+
+# Local LLM Support (Ollama)
+ollama>=0.1.0  # Ollama Python client
+
+# ==================== Grafana & Monitoring ====================
+# (Deployed via Docker - no Python packages needed)
+
