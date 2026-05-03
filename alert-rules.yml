@@ -1,0 +1,274 @@
+"""Prometheus alert rules for Phase 5 monitoring.
+
+This file should be placed at: alert-rules.yml
+"""
+
+groups:
+  - name: rag_pipeline_alerts
+    interval: 30s
+    rules:
+      
+      # =====================================================================
+      # RAG Pipeline Performance Alerts
+      #
+      # AUDIT FIX L5: previous expressions of the form
+      #   `rag_retrieval_latency_ms_bucket{le="1000"} < 0.8`
+      # compared an unaggregated histogram bucket counter against a fraction
+      # — a no-op that could never fire. They are now proper percentile
+      # alerts using `histogram_quantile()` over a 5-minute rate window.
+      # =====================================================================
+
+      - alert: HighRetrievalLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(rag_retrieval_duration_seconds_bucket[5m]))
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          component: retrieval
+        annotations:
+          summary: "Retrieval p95 latency exceeded 1s"
+          description: |
+            Retrieval p95 latency (vector + BM25 fusion) exceeded 1000ms over
+            the last 5 minutes. Check ChromaDB health, pgvector query plans,
+            and embedding throughput.
+
+      - alert: HighRerankerLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(rag_reranking_latency_ms_bucket[5m]))
+          ) > 500
+        for: 5m
+        labels:
+          severity: warning
+          component: reranking
+        annotations:
+          summary: "Reranker p95 latency exceeded 500ms"
+          description: |
+            Cross-encoder rerank p95 exceeded 500ms over 5m. Check GPU
+            saturation and batch size.
+
+      - alert: HighGenerationLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(rag_generation_latency_ms_bucket[5m]))
+          ) > 5000
+        for: 5m
+        labels:
+          severity: warning
+          component: generation
+        annotations:
+          summary: "LLM generation p95 latency exceeded 5s"
+          description: |
+            LLM generation p95 exceeded 5000ms over 5m. Check Ollama queue
+            depth and model load.
+      
+      # =====================================================================
+      # Cache Performance Alerts
+      # =====================================================================
+      
+      - alert: LowCacheHitRate
+        expr: |
+          (
+            rate(rag_cache_hits[5m])
+            /
+            (rate(rag_cache_hits[5m]) + rate(rag_cache_misses[5m]))
+          ) < 0.3
+        for: 10m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Low cache hit rate detected"
+          description: "Cache hit rate below 30% for 10 minutes"
+      
+      - alert: CacheSizeAlert
+        expr: rag_cache_size > 10000
+        for: 5m
+        labels:
+          severity: info
+          component: cache
+        annotations:
+          summary: "Cache size growing large"
+          description: "Semantic cache size exceeded 10000 entries"
+      
+      # =====================================================================
+      # Error Rate Alerts
+      # =====================================================================
+      
+      - alert: HighErrorRate
+        expr: |
+          (
+            rate(rag_errors_total[5m])
+            /
+            rate(rag_queries_total[5m])
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          component: pipeline
+        annotations:
+          summary: "High error rate in RAG pipeline"
+          description: "Error rate exceeding 5% for 5 minutes"
+      
+      - alert: RetrievalErrors
+        expr: rate(rag_errors_total{error_type="retrieval"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: retrieval
+        annotations:
+          summary: "Retrieval errors detected"
+          description: "Errors occurring in retrieval component"
+      
+      - alert: GenerationErrors
+        expr: rate(rag_errors_total{error_type="generation"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: generation
+        annotations:
+          summary: "LLM generation errors detected"
+          description: "Errors occurring in LLM generation component"
+      
+      # =====================================================================
+      # Infrastructure Alerts
+      # =====================================================================
+      
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: postgresql
+        annotations:
+          summary: "PostgreSQL database is down"
+          description: "PostgreSQL instance is not responding"
+      
+      - alert: ChromaDBDown
+        expr: chroma_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: chromadb
+        annotations:
+          summary: "ChromaDB is down"
+          description: "ChromaDB vector store is not responding"
+      
+      - alert: OllamaDown
+        expr: ollama_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: ollama
+        annotations:
+          summary: "Ollama LLM service is down"
+          description: "Ollama service is not responding"
+      
+      - alert: JaegerDown
+        expr: jaeger_up == 0
+        for: 1m
+        labels:
+          severity: warning
+          service: jaeger
+        annotations:
+          summary: "Jaeger tracing service is down"
+          description: "Jaeger service is not responding - tracing disabled"
+      
+      - alert: PrometheusDown
+        expr: up{job="prometheus"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: prometheus
+        annotations:
+          summary: "Prometheus is down"
+          description: "Prometheus instance is not responding"
+      
+      # =====================================================================
+      # Resource Utilization Alerts
+      # =====================================================================
+      
+      - alert: HighMemoryUsage
+        expr: container_memory_usage_bytes{pod_name=~"codelens.*"} / 1073741824 > 4
+        for: 5m
+        labels:
+          severity: warning
+          resource: memory
+        annotations:
+          summary: "High memory usage detected"
+          description: "Container memory usage exceeding 4GB"
+      
+      - alert: HighDiskUsage
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.2
+        for: 10m
+        labels:
+          severity: warning
+          resource: disk
+        annotations:
+          summary: "Low disk space"
+          description: "Disk usage exceeding 80%"
+      
+      # =====================================================================
+      # Evaluation Framework Alerts
+      # =====================================================================
+      
+      - alert: LowFaithfullnessScore
+        # AUDIT FIX L4: alert only fires when fresh RAGAS samples exist in the
+        # last hour. A bare `avg(...)` gauge can be silently stale (no
+        # evaluation runs) and never trip; the rate guard prevents that.
+        expr: |
+          (avg_over_time(rag_faithfulness_score[1h]) < 0.7)
+          and on()
+          (sum(rate(rag_quality_samples_total[1h])) > 0)
+        for: 30m
+        labels:
+          severity: warning
+          component: evaluation
+        annotations:
+          summary: "Low faithfulness score detected"
+          description: "Average faithfulness score below 0.7 (70%)"
+
+      - alert: LowContextRecall
+        expr: |
+          (avg_over_time(rag_context_recall_score[1h]) < 0.7)
+          and on()
+          (sum(rate(rag_quality_samples_total[1h])) > 0)
+        for: 30m
+        labels:
+          severity: warning
+          component: evaluation
+        annotations:
+          summary: "Low context recall detected"
+          description: "Average context recall below 0.7 (70%)"
+
+      - alert: LowAnswerRelevancy
+        expr: |
+          (avg_over_time(rag_answer_relevancy_score[1h]) < 0.7)
+          and on()
+          (sum(rate(rag_quality_samples_total[1h])) > 0)
+        for: 30m
+        labels:
+          severity: warning
+          component: evaluation
+        annotations:
+          summary: "Low answer relevancy detected"
+          description: "Average answer relevancy below 0.7 (70%)"
+
+      - alert: RAGEvaluationStalled
+        # If we've not received a single RAGAS sample in 2h, the evaluation
+        # background task is dead and quality alerts above are flying blind.
+        expr: sum(rate(rag_quality_samples_total[2h])) == 0
+        for: 2h
+        labels:
+          severity: warning
+          component: evaluation
+        annotations:
+          summary: "RAGAS evaluation pipeline appears stalled"
+          description: |
+            No rag_quality_samples_total increments observed for 2 hours.
+            The background RAGAS evaluator has likely crashed or is starved.
