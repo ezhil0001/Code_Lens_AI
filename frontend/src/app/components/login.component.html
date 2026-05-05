@@ -1,0 +1,68 @@
+<div class="login-container">
+  <div class="login-card">
+    <h1 class="login-title">🔐 CodeLens AI</h1>
+    <p class="login-subtitle">Sign in to continue</p>
+
+    <form [formGroup]="loginForm" (ngSubmit)="onLogin()" class="login-form">
+      <!-- Email Field -->
+      <div class="form-group">
+        <label for="email" class="form-label">Email Address</label>
+        <input
+          id="email"
+          type="email"
+          formControlName="email"
+          class="form-input"
+          placeholder="you@example.com"
+          [class.input-error]="f['email'].invalid && f['email'].touched"
+        />
+        <span
+          *ngIf="f['email'].invalid && f['email'].touched"
+          class="error-message"
+        >
+          Please enter a valid email address
+        </span>
+      </div>
+
+      <!-- Password Field -->
+      <div class="form-group">
+        <label for="password" class="form-label">Password</label>
+        <input
+          id="password"
+          type="password"
+          formControlName="password"
+          class="form-input"
+          placeholder="Enter your password"
+          [class.input-error]="f['password'].invalid && f['password'].touched"
+        />
+        <span
+          *ngIf="f['password'].invalid && f['password'].touched"
+          class="error-message"
+        >
+          Password must be at least 6 characters
+        </span>
+      </div>
+
+      <!-- Error Message -->
+      <div *ngIf="errorMessage" class="error-banner">
+        {{ errorMessage }}
+      </div>
+
+      <!-- Submit Button -->
+      <button
+        type="submit"
+        class="login-button"
+        [disabled]="isLoading || loginForm.invalid"
+      >
+        <span *ngIf="!isLoading">Sign In</span>
+        <span *ngIf="isLoading" class="loading-spinner">
+          ⏳ Signing in...
+        </span>
+      </button>
+
+      <!-- Development Mode Info -->
+      <p class="dev-info">
+        💡 For testing: Use any email and password (backend not required)
+      </p>
+    </form>
+  </div>
+</div>

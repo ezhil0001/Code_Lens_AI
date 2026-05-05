@@ -1,12 +1,13 @@
 import { Component, OnInit } from '@angular/core';
-import { ChatComponent } from './components/chat.component';
+import { CommonModule } from '@angular/common';
+import { RouterOutlet } from '@angular/router';
 import { SessionService } from './core/services/session.service';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [ChatComponent],
-  template: `<app-chat></app-chat>`,
+  imports: [CommonModule, RouterOutlet],
+  template: `<router-outlet></router-outlet>`,
   styles: [`
     :host {
       display: block;

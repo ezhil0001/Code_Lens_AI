@@ -9,7 +9,7 @@
 
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
-import { Observable, BehaviorSubject, throwError } from 'rxjs';
+import { Observable, BehaviorSubject, throwError, timeout } from 'rxjs';
 import { catchError, tap } from 'rxjs/operators';
 
 export interface ChatMessage {
@@ -43,8 +43,8 @@ export class SessionService {
   /**
    * Initialize session on app startup
    * 1. Check if session exists in storage
-   * 2. If yes, validate with backend
-   * 3. If valid, recover chat history
+   * 2. If yes, use it (no backend validation - that's done at login)
+   * 3. If no, create new session when user logs in
    */
   initializeSession(): void {
     console.log('🔧 [SessionService] Initializing session...');
@@ -56,28 +56,14 @@ export class SessionService {
       console.log(`📌 Found stored session: ${storedSessionId}`);
       this.sessionId.next(storedSessionId);
       this.userId.next(storedUserId);
-
-      // Validate session with backend
-      this.validateSessionWithBackend(storedSessionId, storedUserId).subscribe({
-        next: (isValid) => {
-          if (isValid) {
-            console.log('✅ Session validated with backend');
-            // Optionally recover history here
-            this.recoverChatHistory(storedSessionId, storedUserId);
-          } else {
-            console.warn('⚠️  Session validation failed, creating new session');
-            this.createNewSession();
-          }
-        },
-        error: (error) => {
-          console.warn('⚠️  Session validation error:', error);
-          // Fall back to offline mode or create new session
-          this.createNewSession();
-        },
+      
+      // Try to recover history if backend is available (non-blocking)
+      this.recoverChatHistory(storedSessionId, storedUserId).subscribe({
+        next: () => console.log('✅ Chat history recovered'),
+        error: () => console.warn('⚠️ Could not recover chat history (backend may be down)')
       });
     } else {
-      console.log('📝 No stored session found, creating new session');
-      this.createNewSession();
+      console.log('📝 No stored session found - waiting for login');
     }
   }
 
@@ -98,7 +84,7 @@ export class SessionService {
   }
 
   /**
-   * Validate session with backend
+   * Validate session with backend (with 3 second timeout)
    * This ensures the session_id is legitimate and user_id matches
    */
   validateSessionWithBackend(
@@ -114,6 +100,7 @@ export class SessionService {
         }
       )
       .pipe(
+        timeout(3000), // 3 second timeout
         tap((response) => {
           console.log('✅ Backend validation response:', response);
         }),
@@ -125,7 +112,7 @@ export class SessionService {
   }
 
   /**
-   * Fetch chat history from backend for a session
+   * Fetch chat history from backend for a session (with 3 second timeout)
    * This recovers lost messages after a hard refresh
    */
   recoverChatHistory(
@@ -147,13 +134,18 @@ export class SessionService {
         }
       )
       .pipe(
+        timeout(3000), // 3 second timeout
         tap((response) => {
           console.log(
             `✅ Recovered ${response.messages.length} messages from backend`
           );
           console.log('📊 Chat History:', response.messages);
         }),
-        catchError((error: HttpErrorResponse) => {
+        catchError((error: any) => {
+          if (error.name === 'TimeoutError') {
+            console.warn('⚠️  History recovery timeout (backend slow or unreachable)');
+            return throwError(() => new Error('Timeout'));
+          }
           if (error.status === 404) {
             console.warn('⚠️  No history found for this session (first message)');
             return throwError(() => new Error('No history found'));
