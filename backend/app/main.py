@@ -141,6 +141,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️  RAG pipeline pre-warm failed (will init on first request): {e}\n")
 
+    # ── Phase Startup Tests ───────────────────────────────────────────────
+    # Runs all phase_* test suites and logs structured pass/fail report.
+    # Controlled by STARTUP_TESTS_ENABLED env var (default: true).
+    # Failures are logged but never crash the server.
+    try:
+        from app.tests.runner import StartupTestRunner
+        await StartupTestRunner.run_all()
+    except Exception as e:
+        logger.warning(f"⚠️  Startup test runner failed unexpectedly: {e}")
+
     yield
     
     # ===== SHUTDOWN =====
