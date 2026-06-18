@@ -185,8 +185,14 @@ class AgentBrain:
         └─→ Store conversation in PostgreSQL
         ↓
     User
+
+    .. deprecated::
+        Migrated to LangGraph Supervisor graph (Phase B). Kept as compatibility
+        shim for any callers that have not yet been updated.
     """
-    
+
+    _DEPRECATED = True  # Migrated to LangGraph Supervisor graph (Phase B)
+
     def __init__(
         self,
         config: Optional[AgentConfig] = None,

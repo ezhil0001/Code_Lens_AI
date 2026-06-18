@@ -1,6 +1,6 @@
 """
-Supervisor Graph — Root LangGraph StateGraph (Phase A: F-02, F-04)
-===================================================================
+Supervisor Graph — Root LangGraph StateGraph (Phase A: F-02, F-04 | Phase B: F-10)
+====================================================================================
 Wires all node stubs and agent sub-graphs together into the Supervisor
 StateGraph.  Phase A ships stubs for nodes that will be implemented in
 later phases — each stub is a valid async node that logs and returns
@@ -63,7 +63,21 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 
 from app.graph.nodes.intent_classifier import intent_classifier_node
+from app.graph.nodes.synthesizer import synthesizer_node as _real_synthesizer_node
 from app.graph.state import AgentState
+
+# ── Phase B: import real agent sub-graphs ────────────────────────────────────
+try:
+    from app.graph.agents.code_agent import build_code_agent as _build_code_agent
+    from app.graph.agents.doc_agent import build_doc_agent as _build_doc_agent
+    from app.graph.agents.debug_agent import build_debug_agent as _build_debug_agent
+    from app.graph.agents.arch_agent import build_arch_agent as _build_arch_agent
+    from app.graph.agents.web_agent import build_web_agent as _build_web_agent
+    _AGENTS_AVAILABLE = True
+except Exception as _agent_import_err:  # noqa: BLE001
+    logger = logging.getLogger(__name__)
+    logger.warning("[SUPERVISOR] Agent sub-graphs not available: %s", _agent_import_err)
+    _AGENTS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -100,87 +114,103 @@ async def memory_read_node(state: dict, config: RunnableConfig = None) -> dict:
 
 
 async def code_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B stub — CodeAgent sub-graph placeholder."""
+    """Phase B — CodeAgent: delegates to compiled sub-graph."""
+    if _AGENTS_AVAILABLE:
+        try:
+            graph = _build_code_agent()
+            result_state = await graph.ainvoke(state, config or {})
+            keys = ("active_agent", "agent_responses", "sources",
+                    "retrieved_chunks", "reranked_chunks", "nodes_visited", "tool_calls")
+            return {k: result_state[k] for k in keys if k in result_state}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CodeAgent] sub-graph failed: %s", exc)
     visited = list(state.get("nodes_visited", []))
-    visited.append("CodeAgent:stub")
+    visited.append("CodeAgent:fallback")
     agent_responses = dict(state.get("agent_responses", {}))
-    agent_responses["CodeAgent"] = "[CodeAgent stub — Phase B not yet implemented]"
-    return {
-        "active_agent": "CodeAgent",
-        "agent_responses": agent_responses,
-        "nodes_visited": visited,
-    }
+    agent_responses["CodeAgent"] = "[CodeAgent unavailable]"
+    return {"active_agent": "CodeAgent", "agent_responses": agent_responses,
+            "nodes_visited": visited}
 
 
 async def doc_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B stub — DocAgent sub-graph placeholder."""
+    """Phase B — DocAgent: delegates to compiled sub-graph."""
+    if _AGENTS_AVAILABLE:
+        try:
+            graph = _build_doc_agent()
+            result_state = await graph.ainvoke(state, config or {})
+            keys = ("active_agent", "agent_responses", "sources",
+                    "retrieved_chunks", "reranked_chunks", "nodes_visited")
+            return {k: result_state[k] for k in keys if k in result_state}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DocAgent] sub-graph failed: %s", exc)
     visited = list(state.get("nodes_visited", []))
-    visited.append("DocAgent:stub")
+    visited.append("DocAgent:fallback")
     agent_responses = dict(state.get("agent_responses", {}))
-    agent_responses["DocAgent"] = "[DocAgent stub — Phase B not yet implemented]"
-    return {
-        "active_agent": "DocAgent",
-        "agent_responses": agent_responses,
-        "nodes_visited": visited,
-    }
+    agent_responses["DocAgent"] = "[DocAgent unavailable]"
+    return {"active_agent": "DocAgent", "agent_responses": agent_responses,
+            "nodes_visited": visited}
 
 
 async def debug_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B stub — DebugAgent sub-graph placeholder."""
+    """Phase B — DebugAgent: delegates to compiled sub-graph."""
+    if _AGENTS_AVAILABLE:
+        try:
+            graph = _build_debug_agent()
+            result_state = await graph.ainvoke(state, config or {})
+            keys = ("active_agent", "agent_responses", "sources",
+                    "retrieved_chunks", "nodes_visited", "tool_calls")
+            return {k: result_state[k] for k in keys if k in result_state}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DebugAgent] sub-graph failed: %s", exc)
     visited = list(state.get("nodes_visited", []))
-    visited.append("DebugAgent:stub")
+    visited.append("DebugAgent:fallback")
     agent_responses = dict(state.get("agent_responses", {}))
-    agent_responses["DebugAgent"] = "[DebugAgent stub — Phase B not yet implemented]"
-    return {
-        "active_agent": "DebugAgent",
-        "agent_responses": agent_responses,
-        "nodes_visited": visited,
-    }
+    agent_responses["DebugAgent"] = "[DebugAgent unavailable]"
+    return {"active_agent": "DebugAgent", "agent_responses": agent_responses,
+            "nodes_visited": visited}
 
 
 async def arch_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B stub — ArchAgent sub-graph placeholder."""
+    """Phase B — ArchAgent: delegates to compiled sub-graph."""
+    if _AGENTS_AVAILABLE:
+        try:
+            graph = _build_arch_agent()
+            result_state = await graph.ainvoke(state, config or {})
+            keys = ("active_agent", "agent_responses", "sources",
+                    "retrieved_chunks", "nodes_visited")
+            return {k: result_state[k] for k in keys if k in result_state}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ArchAgent] sub-graph failed: %s", exc)
     visited = list(state.get("nodes_visited", []))
-    visited.append("ArchAgent:stub")
+    visited.append("ArchAgent:fallback")
     agent_responses = dict(state.get("agent_responses", {}))
-    agent_responses["ArchAgent"] = "[ArchAgent stub — Phase B not yet implemented]"
-    return {
-        "active_agent": "ArchAgent",
-        "agent_responses": agent_responses,
-        "nodes_visited": visited,
-    }
+    agent_responses["ArchAgent"] = "[ArchAgent unavailable]"
+    return {"active_agent": "ArchAgent", "agent_responses": agent_responses,
+            "nodes_visited": visited}
 
 
 async def web_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B stub — WebAgent sub-graph placeholder."""
+    """Phase B — WebAgent: delegates to compiled sub-graph."""
+    if _AGENTS_AVAILABLE:
+        try:
+            graph = _build_web_agent()
+            result_state = await graph.ainvoke(state, config or {})
+            keys = ("active_agent", "agent_responses", "sources",
+                    "tool_results", "nodes_visited")
+            return {k: result_state[k] for k in keys if k in result_state}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[WebAgent] sub-graph failed: %s", exc)
     visited = list(state.get("nodes_visited", []))
-    visited.append("WebAgent:stub")
+    visited.append("WebAgent:fallback")
     agent_responses = dict(state.get("agent_responses", {}))
-    agent_responses["WebAgent"] = "[WebAgent stub — Phase B not yet implemented]"
-    return {
-        "active_agent": "WebAgent",
-        "agent_responses": agent_responses,
-        "nodes_visited": visited,
-    }
+    agent_responses["WebAgent"] = "[WebAgent unavailable]"
+    return {"active_agent": "WebAgent", "agent_responses": agent_responses,
+            "nodes_visited": visited}
 
 
 async def synthesizer_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B stub — merges agent responses (single-agent path: direct copy)."""
-    agent_responses: dict = state.get("agent_responses", {})
-    active_agent: Optional[str] = state.get("active_agent")
-    visited = list(state.get("nodes_visited", []))
-    visited.append("synthesizer_node:stub")
-
-    # Single-agent shortcut: copy the one response without an LLM call
-    if active_agent and active_agent in agent_responses:
-        final = agent_responses[active_agent]
-    elif agent_responses:
-        # Fallback: join all responses
-        final = "\n\n---\n\n".join(agent_responses.values())
-    else:
-        final = "[No response generated]"
-
-    return {"final_response": final, "nodes_visited": visited}
+    """Phase B — delegates to app.graph.nodes.synthesizer.synthesizer_node."""
+    return await _real_synthesizer_node(state, config)
 
 
 async def hil_check_node(state: dict, config: RunnableConfig = None) -> dict:
