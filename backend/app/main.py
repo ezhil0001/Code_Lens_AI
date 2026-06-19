@@ -436,7 +436,7 @@ logger.info("  - POST   /api/v1/ingest/url")
 logger.info("  - GET    /api/v1/ingest/status")
 logger.info("  - DELETE /api/v1/ingest/clear")
 
-# Phase 4: Include chat API routes
+# Phase 4: Include chat API routes (v1 — kept for backward compat)
 if chat_api:
     app.include_router(chat_api.router)
     logger.info("✓ Phase 4 Chat API registered:")
@@ -445,6 +445,27 @@ if chat_api:
     logger.info("  - GET    /api/v1/chat/cache/status")
     logger.info("  - POST   /api/v1/chat/cache/clear")
     logger.info("  - GET    /api/v1/chat/history/{session_id}")
+
+# Phase G: Include v2 chat API + checkpoints API
+try:
+    from app.api.v2 import chat as chat_v2_api
+    app.include_router(chat_v2_api.router)
+    logger.info("✓ Phase G v2 Chat API registered:")
+    logger.info("  - POST   /api/v2/chat/stream (LangGraph SSE)")
+except Exception as _v2_err:  # noqa: BLE001
+    logger.warning("v2 chat API not registered: %s", _v2_err)
+
+try:
+    from app.api import checkpoints as checkpoints_api
+    app.include_router(checkpoints_api.router)
+    logger.info("✓ Checkpoints API registered:")
+    logger.info("  - GET    /api/v2/sessions/{id}/checkpoints")
+    logger.info("  - GET    /api/v2/sessions/{id}/state/{cp_id}")
+    logger.info("  - GET    /api/v2/sessions/{id}/replay/{cp_id}")
+    logger.info("  - POST   /api/v2/sessions/{id}/branch")
+    logger.info("  - POST   /api/v2/sessions/{id}/resume")
+except Exception as _cp_err:  # noqa: BLE001
+    logger.warning("Checkpoints API not registered: %s", _cp_err)
 
 logger.info("✓ Routes registered:")
 logger.info("  - POST   /api/v1/auth/login")
