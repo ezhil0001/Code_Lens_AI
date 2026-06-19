@@ -102,6 +102,19 @@ class BranchResponse(BaseModel):
     message: str
 
 
+class HILResumeRequest(BaseModel):
+    """Payload for POST /{session_id}/resume — human decision on a HIL interrupt."""
+
+    human_input: str
+    """Free-text explanation or instruction from the human reviewer."""
+
+    approved: bool
+    """True = the human approved the action; False = the action is rejected."""
+
+    checkpoint_id: Optional[str] = None
+    """Optional: the specific checkpoint to resume from (defaults to latest)."""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: get checkpointer (never raises)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,3 +356,135 @@ async def branch_conversation(
             f"Use session_id='{branch_session_id}' to stream the replay."
         ),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# E-006  POST /api/v2/sessions/{session_id}/resume
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/{session_id}/resume")
+async def resume_after_hil(
+    session_id: str,
+    body: HILResumeRequest,
+    current_user=Depends(_current_user_dep),
+):
+    """Resume a graph that was paused at a Human-in-the-Loop interrupt.
+
+    The human reviewer POSTs their decision (approved + human_input).  The
+    handler injects these values into the persisted AgentState and
+    re-invokes the supervisor graph from the checkpoint so execution
+    continues from the node after hil_check_node.
+
+    Streams the resumed execution as Server-Sent Events so the client
+    gets live progress updates.
+
+    Request body:
+        human_input   — reviewer's comment or instruction
+        approved      — True = proceed; False = abort
+        checkpoint_id — optional; defaults to the thread's latest checkpoint
+
+    Security:
+        Thread ID is always namespaced to the current user — users cannot
+        resume sessions belonging to other accounts.
+    """
+    from app.graph.checkpointing.pg_checkpointer import build_thread_id, build_config
+    from app.graph.streaming import stream_graph_events
+
+    thread_id = build_thread_id(str(current_user.id), session_id)
+    graph = _get_graph()
+
+    if graph is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Supervisor graph unavailable",
+        )
+
+    # Build resume config — inject hil decision into state via the
+    # LangGraph checkpoint resume mechanism.
+    config = build_config(
+        user_id=str(current_user.id),
+        session_id=session_id,
+        org_id=getattr(current_user, "org_id", None),
+        checkpoint_id=body.checkpoint_id,
+    )
+
+    # Inject human decision into the state update sent on resume.
+    hil_state_update: Dict[str, Any] = {
+        "hil_approved": body.approved,
+        "hil_human_input": body.human_input,
+        "hil_required": False,   # clear the interrupt flag
+    }
+
+    logger.info(
+        "[resume] user=%s session=%s approved=%s checkpoint=%s",
+        current_user.id, session_id, body.approved, body.checkpoint_id,
+    )
+
+    # Persist HIL audit event (best-effort; non-blocking)
+    _audit_hil_event(
+        user_id=str(current_user.id),
+        session_id=session_id,
+        approved=body.approved,
+        human_input=body.human_input,
+        checkpoint_id=body.checkpoint_id,
+    )
+
+    return StreamingResponse(
+        stream_graph_events(graph, hil_state_update, config),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-HIL-Approved": str(body.approved).lower(),
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal: HIL audit log helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _audit_hil_event(
+    user_id: str,
+    session_id: str,
+    approved: bool,
+    human_input: str,
+    checkpoint_id: Optional[str],
+) -> None:
+    """Fire-and-forget: persist a HIL event to the audit_log table.
+
+    Runs synchronously in a thread-pool executor to avoid blocking the
+    event loop.  Silently swallows all errors so HIL resume is never
+    blocked by audit failures.
+    """
+    import asyncio
+
+    async def _write() -> None:
+        try:
+            from app.core.database import get_pg_pool  # type: ignore
+            pool = get_pg_pool()
+            if pool is None:
+                return
+            async with pool.connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO audit_log
+                        (event_type, user_id, session_id, approved,
+                         human_input, checkpoint_id, created_at)
+                    VALUES
+                        ('hil_resume', $1, $2, $3, $4, $5, NOW())
+                    """,
+                    user_id, session_id, approved,
+                    human_input[:2000], checkpoint_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[audit_hil_event] non-fatal audit write failed: %s", exc)
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_write())
+        else:
+            loop.run_until_complete(_write())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[audit_hil_event] could not schedule audit write: %s", exc)
