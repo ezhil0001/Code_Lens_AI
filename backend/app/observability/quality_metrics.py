@@ -39,7 +39,7 @@ from typing import Any, Mapping, Optional
 logger = logging.getLogger(__name__)
 
 try:
-    from prometheus_client import Counter, Gauge
+    from prometheus_client import Counter, Gauge, Histogram
 
     _PROMETHEUS_AVAILABLE = True
 except ImportError:  # pragma: no cover - environment-only
@@ -87,12 +87,65 @@ if _PROMETHEUS_AVAILABLE:
         "Number of RAGAS evaluations completed and published.",
         labelnames=["model", "retriever_strategy"],
     )
+
+    # ── Phase F / H: LangGraph runtime metrics ────────────────────────────────
+
+    # Per-node latency histogram (Phase F middleware + Phase H observability)
+    NODE_LATENCY_MS = Histogram(
+        "langgraph_node_latency_ms",
+        "Execution latency per LangGraph node in milliseconds.",
+        labelnames=["node_name", "agent"],
+        buckets=[10, 50, 100, 250, 500, 1000, 2500, 5000],
+    ) if _PROMETHEUS_AVAILABLE else None
+
+    # Guardrail check events counter (Phase F)
+    GUARDRAIL_EVENTS = Counter(
+        "langgraph_guardrail_events_total",
+        "Guardrail check events — passed, blocked, or scrubbed.",
+        labelnames=["check_name", "action"],
+    ) if _PROMETHEUS_AVAILABLE else None
+
+    # Per-agent token usage histogram (Phase H)
+    AGENT_TOKENS = Histogram(
+        "langgraph_agent_tokens_total",
+        "LLM tokens consumed per agent per turn.",
+        labelnames=["agent_name", "token_type"],
+        buckets=[100, 500, 1000, 2000, 4000, 8000],
+    ) if _PROMETHEUS_AVAILABLE else None
+
+    # Graph edges traversed per turn (Phase H)
+    GRAPH_EDGES_TRAVERSED = Histogram(
+        "langgraph_edges_per_turn",
+        "Number of graph edges traversed per query.",
+        buckets=[1, 2, 3, 5, 8, 13, 21],
+    ) if _PROMETHEUS_AVAILABLE else None
+
+    # HIL interrupt counter (Phase E / H)
+    HIL_INTERRUPTS = Counter(
+        "langgraph_hil_interrupts_total",
+        "Total HIL interrupt events.",
+        labelnames=["reason"],
+    ) if _PROMETHEUS_AVAILABLE else None
+
+    # Long-term memory lookup counter (Phase C / H)
+    LTM_LOOKUPS = Counter(
+        "langgraph_ltm_lookups_total",
+        "Long-term memory lookup events.",
+        labelnames=["result"],
+    ) if _PROMETHEUS_AVAILABLE else None
+
 else:  # pragma: no cover
     RAG_FAITHFULNESS = None
     RAG_CONTEXT_RECALL = None
     RAG_ANSWER_RELEVANCY = None
     RAG_CONTEXT_PRECISION = None
     RAG_QUALITY_SAMPLES = None
+    NODE_LATENCY_MS = None
+    GUARDRAIL_EVENTS = None
+    AGENT_TOKENS = None
+    GRAPH_EDGES_TRAVERSED = None
+    HIL_INTERRUPTS = None
+    LTM_LOOKUPS = None
 
 
 # ---------------------------------------------------------------------------
@@ -182,5 +235,11 @@ __all__ = [
     "RAG_ANSWER_RELEVANCY",
     "RAG_CONTEXT_PRECISION",
     "RAG_QUALITY_SAMPLES",
+    "NODE_LATENCY_MS",
+    "GUARDRAIL_EVENTS",
+    "AGENT_TOKENS",
+    "GRAPH_EDGES_TRAVERSED",
+    "HIL_INTERRUPTS",
+    "LTM_LOOKUPS",
     "publish_ragas_scores",
 ]
