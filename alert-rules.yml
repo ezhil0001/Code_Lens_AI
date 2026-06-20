@@ -272,3 +272,80 @@ groups:
           description: |
             No rag_quality_samples_total increments observed for 2 hours.
             The background RAGAS evaluator has likely crashed or is starved.
+
+  # ===========================================================================
+  # LangGraph Multi-Agent Observability Alerts (Phase H)
+  # ===========================================================================
+
+  - name: langgraph_agent_alerts
+    interval: 30s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # AgentDeadlock — graph stuck in same node for > 30s
+      # Fires when the p95 latency of any single node exceeds 30,000ms,
+      # indicating the node is blocking (network hang, lock contention, etc.)
+      # -----------------------------------------------------------------------
+      - alert: AgentDeadlock
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, node_name) (
+              rate(langgraph_node_latency_ms_bucket[5m])
+            )
+          ) > 30000
+        for: 1m
+        labels:
+          severity: critical
+          component: langgraph
+        annotations:
+          summary: "LangGraph node appears deadlocked (p95 > 30s)"
+          description: |
+            The node {{ $labels.node_name }} has a p95 execution latency
+            exceeding 30 seconds over the last 5 minutes. This indicates a
+            potential deadlock, blocking I/O call, or runaway recursion.
+            Check the node implementation and any downstream service health.
+
+      # -----------------------------------------------------------------------
+      # HILBacklog — more than 10 pending HIL interrupts in 5 minutes
+      # Fires when the HIL interrupt rate is high enough that the human
+      # review queue could be backing up.
+      # -----------------------------------------------------------------------
+      - alert: HILBacklog
+        expr: |
+          sum(increase(langgraph_hil_interrupts_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: langgraph
+        annotations:
+          summary: "High HIL interrupt rate — review backlog may be building"
+          description: |
+            More than 10 Human-in-the-Loop interrupts have been triggered in
+            the last 5 minutes. This may indicate a misconfigured confidence
+            threshold or a surge in destructive-intent queries. Review the
+            hil_reason label breakdown and adjust HIL_CONFIDENCE_THRESHOLD
+            if legitimate queries are being incorrectly intercepted.
+
+      # -----------------------------------------------------------------------
+      # GuardrailBlockSurge — sudden spike in blocked queries
+      # Fires when the rate of blocked guardrail events exceeds 5 per minute,
+      # which could indicate a prompt-injection campaign or a mis-tuned rule.
+      # -----------------------------------------------------------------------
+      - alert: GuardrailBlockSurge
+        expr: |
+          sum(
+            rate(langgraph_guardrail_events_total{action="blocked"}[5m])
+          ) * 60 > 5
+        for: 2m
+        labels:
+          severity: warning
+          component: langgraph
+        annotations:
+          summary: "Guardrail block rate surge detected"
+          description: |
+            The input or output guardrail is blocking more than 5 requests
+            per minute. This may indicate an active prompt-injection attempt,
+            a sudden influx of policy-violating queries, or a guardrail
+            rule that is too aggressive. Check the check_name label for
+            which guardrail is firing most frequently.
