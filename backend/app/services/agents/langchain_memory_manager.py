@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid as _uuid
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
@@ -42,6 +43,21 @@ except ImportError as _e:  # pragma: no cover
 _DEFAULT_TABLE = "chat_message_history"
 
 
+def _to_uuid_session(session_id: str) -> str:
+    """Normalise any session_id string to a valid UUID.
+
+    ``PostgresChatMessageHistory`` strictly requires a UUID. Front-end session
+    IDs like ``sess-1781934335180-w1o4yt3oh`` are deterministically mapped to a
+    UUID5 (namespaced under DNS) so the same session always resolves to the
+    same UUID across restarts.
+    """
+    try:
+        _uuid.UUID(session_id)
+        return session_id  # already a valid UUID — return as-is
+    except ValueError:
+        return str(_uuid.uuid5(_uuid.NAMESPACE_DNS, session_id))
+
+
 class ChatMemoryManager:
     """LangChain-backed chat memory manager — pooled Postgres edition.
 
@@ -55,19 +71,29 @@ class ChatMemoryManager:
         self,
         table_name: str = _DEFAULT_TABLE,
     ) -> None:
-        if not HAS_LANGCHAIN_POSTGRES:
-            raise RuntimeError(
-                "langchain_postgres is required. Install with `pip install "
-                "langchain-postgres psycopg[binary] psycopg-pool`."
-            )
-
         self.table_name = table_name
         self._tables_ready = False
-        self._init_table()
-        logger.info(
-            f"✅ ChatMemoryManager (LangChain Postgres + shared pool) ready "
-            f"— table={self.table_name}"
-        )
+        self._available = HAS_LANGCHAIN_POSTGRES
+
+        if not HAS_LANGCHAIN_POSTGRES:
+            logger.warning(
+                "ChatMemoryManager: langchain_postgres not installed — "
+                "running in no-op mode (install: pip install langchain-postgres "
+                "psycopg[binary] psycopg-pool)"
+            )
+            return
+
+        try:
+            self._init_table()
+            logger.info(
+                f"✅ ChatMemoryManager (LangChain Postgres + shared pool) ready "
+                f"— table={self.table_name}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"ChatMemoryManager: table init failed ({e}) — running in no-op mode"
+            )
+            self._available = False
 
     # ------------------------------------------------------------------ #
     # Connection helpers (delegated to app.core.database singleton pool)  #
@@ -105,7 +131,7 @@ class ChatMemoryManager:
         """
         return PostgresChatMessageHistory(
             self.table_name,
-            session_id,
+            _to_uuid_session(session_id),
             sync_connection=conn,
         )
 
@@ -121,6 +147,9 @@ class ChatMemoryManager:
         metadata: Optional[dict] = None,
     ) -> None:
         """Append a single message to the session's history."""
+        if not self._available:
+            return  # no-op when langchain_postgres / Postgres unavailable
+
         role = (role or "user").lower()
         if role == "user":
             msg = HumanMessage(content=content)
@@ -143,11 +172,9 @@ class ChatMemoryManager:
         session_id: str,
         max_tokens: int = 2000,
     ) -> Optional[str]:
-        """Return a flattened text history for prompt injection.
-
-        We approximate token budgeting via 4 chars/token and trim from the
-        oldest end to keep the most recent context.
-        """
+        """Return a flattened text history for prompt injection."""
+        if not self._available:
+            return None  # no-op when langchain_postgres / Postgres unavailable
         def _load_messages() -> list:
             with self._checkout() as conn:
                 history = self._history_with(conn, session_id)

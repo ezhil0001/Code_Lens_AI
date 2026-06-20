@@ -1,4 +1,4 @@
-import { Injectable } from '@angular/core';
+import { Injectable, NgZone } from '@angular/core';
 import { BehaviorSubject, Observable, Subject } from 'rxjs';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import { environment } from '../../../environments/environment';
@@ -32,7 +32,7 @@ export class AIStreamService {
   // Streaming controller for cleanup
   private streamController: AbortController | null = null;
 
-  constructor() {}
+  constructor(private ngZone: NgZone) {}
 
   /**
    * Stream a chat message from the FastAPI backend
@@ -137,50 +137,52 @@ export class AIStreamService {
            * }
            */
           onmessage: (event) => {
-            try {
-              const data = JSON.parse(event.data);
+            this.ngZone.run(() => {
+              try {
+                const data = JSON.parse(event.data);
 
-              if (data.type === 'heartbeat') {
-                return; // Silent — don't emit anything to UI
+                if (data.type === 'heartbeat') {
+                  return; // Silent — don't emit anything to UI
+                }
+
+                // Handle different token types
+                // Backend sends type='token' with field 'content',
+                // but also support legacy type='content' with field 'token'.
+                // AFTER:
+                if (data.type === 'token' || data.type === 'content') {
+                  const chunk: string = data.content ?? data.token ?? '';
+                  const currentMessage = this.fullMessageSubject.value;
+                  const accumulated = currentMessage + chunk;
+
+                  // Try to extract answer from JSON if complete
+                  const cleaned = this.extractAnswer(accumulated);
+                  this.fullMessageSubject.next(cleaned);
+                  this.streamingSubject.next(chunk);
+                } else if (data.type === 'citations') {
+                  // Citation/metadata event
+                  console.log('📚 Citations received:', data.citations);
+                } else if (data.type === 'done') {
+                  // Stream complete — log final response
+                  const finalMessage = this.fullMessageSubject.value;
+                  console.log('\n' + '='.repeat(80));
+                  console.log('✅ STREAM COMPLETED - FINAL RESPONSE');
+                  console.log('='.repeat(80));
+                  console.log('📝 Full Message:', finalMessage);
+                  console.log('📊 Metadata:', data.metadata);
+                  console.log('-'.repeat(80));
+                  console.log(finalMessage);
+                  console.log('-'.repeat(80));
+                  console.log('='.repeat(80) + '\n');
+
+                  this.loadingSubject.next(false);
+                  observer.next();
+                  observer.complete();
+                }
+              } catch (error) {
+                console.error('❌ Failed to parse token:', error);
+                this.errorSubject.next('Failed to parse response');
               }
-
-              // Handle different token types
-              // Backend sends type='token' with field 'content',
-              // but also support legacy type='content' with field 'token'.
-              // AFTER:
-              if (data.type === 'token' || data.type === 'content') {
-                const chunk: string = data.content ?? data.token ?? '';
-                const currentMessage = this.fullMessageSubject.value;
-                const accumulated = currentMessage + chunk;
-
-                // Try to extract answer from JSON if complete
-                const cleaned = this.extractAnswer(accumulated);
-                this.fullMessageSubject.next(cleaned);
-                this.streamingSubject.next(chunk);
-              } else if (data.type === 'citations') {
-                // Citation/metadata event
-                console.log('📚 Citations received:', data.citations);
-              } else if (data.type === 'done') {
-                // Stream complete — log final response
-                const finalMessage = this.fullMessageSubject.value;
-                console.log('\n' + '='.repeat(80));
-                console.log('✅ STREAM COMPLETED - FINAL RESPONSE');
-                console.log('='.repeat(80));
-                console.log('📝 Full Message:', finalMessage);
-                console.log('📊 Metadata:', data.metadata);
-                console.log('-'.repeat(80));
-                console.log(finalMessage);
-                console.log('-'.repeat(80));
-                console.log('='.repeat(80) + '\n');
-
-                this.loadingSubject.next(false);
-                observer.next();
-                observer.complete();
-              }
-            } catch (error) {
-              console.error('❌ Failed to parse token:', error);
-              this.errorSubject.next('Failed to parse response');
-            }
+            });
           },
 
           /**
@@ -194,16 +196,20 @@ export class AIStreamService {
 
             // AbortError = user cancelled — complete silently
             if (error instanceof Error && error.name === 'AbortError') {
-              this.loadingSubject.next(false);
-              observer.complete();
+              this.ngZone.run(() => {
+                this.loadingSubject.next(false);
+                observer.complete();
+              });
               throw error; // re-throw to stop fetchEventSource
             }
 
             // Fatal HTTP errors (4xx) — don't retry
             if (error instanceof Error && error.message.includes('4')) {
-              this.loadingSubject.next(false);
-              this.errorSubject.next(error.message);
-              observer.error(error);
+              this.ngZone.run(() => {
+                this.loadingSubject.next(false);
+                this.errorSubject.next(error.message);
+                observer.error(error);
+              });
               throw error; // re-throw to stop fetchEventSource
             }
 
@@ -211,19 +217,23 @@ export class AIStreamService {
             console.warn(
               '⚠️ Stream error — not retrying (stateful RAG pipeline)',
             );
-            this.loadingSubject.next(false);
-            this.errorSubject.next(
-              'Connection lost. Please send your message again.',
-            );
-            observer.error(error);
+            this.ngZone.run(() => {
+              this.loadingSubject.next(false);
+              this.errorSubject.next(
+                'Connection lost. Please send your message again.',
+              );
+              observer.error(error);
+            });
             throw error; // ← Must throw to stop fetchEventSource completely
           },
         },
       ).catch((error) => {
         if (error.name !== 'AbortError') {
-          console.error('❌ Stream fetch error:', error);
-          this.errorSubject.next(error.message || 'Stream failed');
-          observer.error(error);
+          this.ngZone.run(() => {
+            console.error('❌ Stream fetch error:', error);
+            this.errorSubject.next(error.message || 'Stream failed');
+            observer.error(error);
+          });
         }
       });
     });

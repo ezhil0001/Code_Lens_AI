@@ -805,9 +805,9 @@ async def get_chat_history(session_id: str, db: Session = Depends(get_db)) -> di
     logger.info(f"📋 Fetching chat history for session: {session_id}")
     
     try:
-        from app.services.agents.agent_brain import ChatMemoryManager
+        from app.services.agents.langchain_memory_manager import ChatMemoryManager
         memory_mgr = ChatMemoryManager()
-        messages = memory_mgr.get_history(session_id)
+        messages = await memory_mgr.get_history(session_id) or []
         
         return {
             "session_id": session_id,

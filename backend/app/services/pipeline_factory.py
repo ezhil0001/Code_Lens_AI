@@ -86,9 +86,16 @@ class RAGPipelineFactory:
         logger.info("  │  ✅ Few-Shot Prompt Builder initialized")
         
         # Initialize Memory Manager (LangChain PostgresChatMessageHistory)
-        from app.services.agents.langchain_memory_manager import ChatMemoryManager
-        self.memory_manager = ChatMemoryManager()
-        logger.info("  │  ✅ Chat Memory Manager (LangChain Postgres) initialized")
+        try:
+            from app.services.agents.langchain_memory_manager import ChatMemoryManager
+            self.memory_manager = ChatMemoryManager()
+            logger.info("  │  ✅ Chat Memory Manager (LangChain Postgres) initialized")
+        except Exception as _mem_err:
+            logger.warning(
+                f"  │  ⚠️  Chat Memory Manager unavailable ({_mem_err}) — "
+                "continuing without persistent chat history"
+            )
+            self.memory_manager = None
         
         # Initialize LLM Client
         logger.info("  ├─ Initializing LLM Client...")
@@ -267,7 +274,19 @@ class RAGPipelineFactory:
     def get_retriever(self):
         """Get the Retrieval Engine."""
         return self.retriever
-    
+
+    def get_retriever_engine(self):
+        """Alias for get_retriever() — returns the RetrieverEngine instance."""
+        return self.retriever
+
+    def get_reranker(self):
+        """Get the reranker component from the retriever (if available)."""
+        return getattr(self.retriever, 'reranker', None)
+
+    def get_llm(self):
+        """Get the configured LLM client."""
+        return self.llm_client
+
     def get_router(self):
         """Get the Agentic Router."""
         return self.router

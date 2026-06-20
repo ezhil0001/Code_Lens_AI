@@ -134,6 +134,10 @@ async def stream_graph_events(
             # Resume mode: no initial input — graph reads from checkpoint
             event_stream = graph.astream_events(None, **stream_kwargs)
 
+        # Track run_ids of nodes that already streamed at least one LLM token.
+        # Used to prevent on_chain_end from emitting a duplicate final_response.
+        _streamed_run_ids: set[str] = set()
+
         async for event in event_stream:
             kind: str = event.get("event", "")
             run_id: str = str(event.get("run_id", ""))
@@ -150,6 +154,11 @@ async def stream_graph_events(
                         else str(chunk)
                     )
                     if token:
+                        # Record every parent chain run_id that produced a real
+                        # LLM token so on_chain_end can skip the fallback emit.
+                        for parent_id in event.get("parent_ids", []):
+                            _streamed_run_ids.add(parent_id)
+                        _streamed_run_ids.add(run_id)
                         yield format_sse(SSEEvent(
                             type="token",
                             data={"content": token},
@@ -210,6 +219,34 @@ async def stream_graph_events(
 
             # ── Chain end — node checkpoint ───────────────────────────────────
             elif kind == "on_chain_end":
+                # When the synthesizer/response node finishes, emit final_response
+                # as a token event so the client always renders the answer even
+                # when the LLM call failed and astream_events never fired a
+                # on_chat_model_stream event.
+                output = event.get("data", {}).get("output")
+                if isinstance(output, dict):
+                    final_response = output.get("final_response")
+                    node_name = name.lower()
+                    is_response_node = any(
+                        kw in node_name
+                        for kw in ("synthesizer", "response", "generate", "code_generate", "doc_generate")
+                    )
+                    # Guard: only emit as fallback when the LLM did NOT already
+                    # stream individual tokens for this node's run_id.
+                    if (
+                        is_response_node
+                        and final_response
+                        and isinstance(final_response, str)
+                        and run_id not in _streamed_run_ids
+                    ):
+                        yield format_sse(SSEEvent(
+                            type="token",
+                            data={"content": final_response},
+                            agent=name,
+                            checkpoint_id=run_id,
+                            ts=time.time() * 1000,
+                        ))
+
                 yield format_sse(SSEEvent(
                     type="checkpoint",
                     data={"node": name},

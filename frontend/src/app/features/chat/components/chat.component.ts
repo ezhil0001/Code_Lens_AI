@@ -1,12 +1,16 @@
-import { Component, OnInit, ViewChild, ElementRef, AfterViewChecked } from '@angular/core';
+import { Component, OnInit, OnDestroy, ViewChild, ElementRef, AfterViewChecked, ChangeDetectorRef, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpClientModule } from '@angular/common/http';
+import { Subscription } from 'rxjs';
 import { MarkdownViewerComponent } from '../../../shared/components/markdown-viewer/markdown-viewer.component';
 import { CitationBadgeComponent } from '../../../shared/components/citation-badge/citation-badge.component';
 import { AIStreamService } from '../../../core/services/ai-stream.service';
+import { AgentStreamService, AgentActivityEntry, HILInterruptPayload } from '../../../core/services/agent-stream.service';
 import { IngestService } from '../../../core/services/ingest.service';
 import { Message, Citation } from '../../../data/models/message.model';
+import { AgentActivityComponent } from './agent-activity.component';
+import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
 
 /**
  * ChatComponent
@@ -22,12 +26,15 @@ import { Message, Citation } from '../../../data/models/message.model';
 @Component({
   selector: 'app-chat',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     CommonModule,
     FormsModule,
     HttpClientModule,
     MarkdownViewerComponent,
-    CitationBadgeComponent
+    CitationBadgeComponent,
+    AgentActivityComponent,
+    CheckpointTimelineComponent,
   ],
   template: `
     <div class="chat-container">
@@ -35,9 +42,40 @@ import { Message, Citation } from '../../../data/models/message.model';
       <div class="chat-header">
         <h1>CodeLens AI</h1>
         <p class="subtitle">Enterprise RAG for Your Codebase</p>
-        <button (click)="toggleUploadPanel()" class="upload-toggle-btn" title="Upload documents">
-          📤 Upload Documents
-        </button>
+        <div class="header-actions">
+          <button (click)="toggleActivityPanel()" class="header-icon-btn" title="Agent Activity"
+                  [class.active]="showActivityPanel">
+            ⚡ Activity
+          </button>
+          <button (click)="toggleTimeline()" class="header-icon-btn" title="Checkpoint Timeline"
+                  [class.active]="showTimeline">
+            ⏱ Timeline
+          </button>
+          <button (click)="toggleUploadPanel()" class="upload-toggle-btn" title="Upload documents">
+            📤 Upload
+          </button>
+        </div>
+      </div>
+
+      <!-- HIL Approval Banner -->
+      <div *ngIf="hilInterrupt" class="hil-banner">
+        <div class="hil-inner">
+          <div class="hil-icon">⚠️</div>
+          <div class="hil-body">
+            <div class="hil-title">Human Review Required</div>
+            <div class="hil-reason">{{ hilInterrupt.reason }}</div>
+            <div class="hil-actions">
+              <input
+                type="text"
+                [(ngModel)]="hilInput"
+                placeholder="Optional: add context or guidance…"
+                class="hil-input"
+              />
+              <button class="hil-approve-btn" (click)="onHILApprove()">✅ Approve</button>
+              <button class="hil-reject-btn" (click)="onHILReject()">❌ Reject</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Upload Panel -->
@@ -87,8 +125,10 @@ import { Message, Citation } from '../../../data/models/message.model';
         </div>
       </div>
 
-      <!-- Messages Area -->
-      <div class="messages-area" #messagesContainer>
+      <!-- Main split layout: chat + side panels -->
+      <div class="main-split">
+        <!-- Messages Area -->
+        <div class="messages-area" #messagesContainer>
         <div class="messages-list">
           <!-- Empty State -->
           <div *ngIf="messages.length === 0" class="empty-state">
@@ -105,7 +145,7 @@ import { Message, Citation } from '../../../data/models/message.model';
           </div>
 
           <!-- Messages -->
-          <div *ngFor="let message of messages; let last = last"
+          <div *ngFor="let message of messages; let last = last; trackBy: trackByMessageId"
                [class.message-row]="true"
                [class.user]="message.role === 'user'"
                [class.assistant]="message.role === 'assistant'">
@@ -118,13 +158,17 @@ import { Message, Citation } from '../../../data/models/message.model';
             <!-- Assistant Message -->
             <div *ngIf="message.role === 'assistant'" class="message assistant-message">
               <div class="message-content">
-                <!-- Markdown with syntax highlighting -->
-                <app-markdown-viewer 
+                <!-- During streaming: plain text avoids per-token markdown re-parse -->
+                <pre *ngIf="message.isStreaming" class="streaming-text">{{ message.content }}<span class="cursor">▌</span></pre>
+
+                <!-- After streaming: full markdown with syntax highlighting -->
+                <app-markdown-viewer
+                  *ngIf="!message.isStreaming"
                   [content]="message.content">
                 </app-markdown-viewer>
 
-                <!-- Streaming indicator -->
-                <div *ngIf="message.isStreaming" class="streaming-indicator">
+                <!-- Streaming indicator (three dots below text while loading) -->
+                <div *ngIf="message.isStreaming && !message.content" class="streaming-indicator">
                   <span class="dot"></span>
                   <span class="dot"></span>
                   <span class="dot"></span>
@@ -159,6 +203,27 @@ import { Message, Citation } from '../../../data/models/message.model';
           </div>
         </div>
       </div>
+
+        <!-- Agent Activity Side Panel -->
+        <div *ngIf="showActivityPanel" class="side-panel">
+          <app-agent-activity
+            [activities]="agentActivities"
+            [isStreaming]="isLoading"
+            (checkpointSelected)="onCheckpointBadgeClick($event)">
+          </app-agent-activity>
+        </div>
+
+        <!-- Checkpoint Timeline Side Panel -->
+        <div *ngIf="showTimeline" class="side-panel">
+          <app-checkpoint-timeline
+            [sessionId]="currentSessionId"
+            [visible]="showTimeline"
+            (replayRequested)="onReplayCheckpoint($event)"
+            (branchCreated)="onBranchCreated($event)"
+            (closed)="showTimeline = false">
+          </app-checkpoint-timeline>
+        </div>
+      </div><!-- end .main-split -->
 
       <!-- Input Area -->
       <div class="input-area">
@@ -197,6 +262,14 @@ import { Message, Citation } from '../../../data/models/message.model';
           <label>
             <input type="checkbox" [(ngModel)]="showCitations" checked>
             <span>Show Citations</span>
+          </label>
+          <label>
+            <input type="checkbox" [(ngModel)]="useV2Stream">
+            <span>Agent Stream (v2)</span>
+          </label>
+          <label *ngIf="useV2Stream">
+            <input type="checkbox" [(ngModel)]="hilEnabled">
+            <span>HIL Review</span>
           </label>
         </div>
       </div>
@@ -542,6 +615,31 @@ import { Message, Citation } from '../../../data/models/message.model';
     }
 
     /* Streaming */
+    .streaming-text {
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: transparent;
+      border: none;
+      padding: 0;
+      margin: 0;
+      color: inherit;
+      line-height: 1.6;
+    }
+
+    .cursor {
+      display: inline-block;
+      animation: blink 1s step-end infinite;
+      color: #667eea;
+      margin-left: 1px;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0; }
+    }
+
     .streaming-indicator {
       display: flex;
       gap: 4px;
@@ -663,6 +761,7 @@ import { Message, Citation } from '../../../data/models/message.model';
       gap: 20px;
       margin-top: 12px;
       font-size: 13px;
+      flex-wrap: wrap;
     }
 
     .settings-row label {
@@ -678,9 +777,136 @@ import { Message, Citation } from '../../../data/models/message.model';
       height: 16px;
       cursor: pointer;
     }
+
+    /* ── Header actions ─────────────────────────────────────────── */
+    .header-actions {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      gap: 6px;
+    }
+
+    .header-icon-btn {
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: rgba(255,255,255,0.85);
+      padding: 5px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      transition: background 0.15s;
+    }
+
+    .header-icon-btn:hover,
+    .header-icon-btn.active {
+      background: rgba(255,255,255,0.22);
+      border-color: rgba(255,255,255,0.4);
+    }
+
+    /* ── HIL banner ─────────────────────────────────────────────── */
+    .hil-banner {
+      background: #451a03;
+      border-bottom: 2px solid #fbbf24;
+      padding: 12px 20px;
+      flex-shrink: 0;
+      animation: slideDown 0.25s ease-out;
+    }
+
+    .hil-inner {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .hil-icon {
+      font-size: 22px;
+      flex-shrink: 0;
+      padding-top: 2px;
+    }
+
+    .hil-body {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .hil-title {
+      font-weight: 700;
+      color: #fbbf24;
+      font-size: 13px;
+    }
+
+    .hil-reason {
+      color: #fde68a;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .hil-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .hil-input {
+      flex: 1;
+      min-width: 200px;
+      background: #1c1008;
+      border: 1px solid #92400e;
+      color: #fde68a;
+      padding: 6px 10px;
+      border-radius: 5px;
+      font-size: 12px;
+    }
+
+    .hil-input::placeholder { color: #78350f; }
+    .hil-input:focus { outline: none; border-color: #fbbf24; }
+
+    .hil-approve-btn,
+    .hil-reject-btn {
+      border: none;
+      border-radius: 5px;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .hil-approve-btn { background: #065f46; color: #6ee7b7; }
+    .hil-approve-btn:hover { opacity: 0.85; }
+    .hil-reject-btn  { background: #7f1d1d; color: #fca5a5; }
+    .hil-reject-btn:hover { opacity: 0.85; }
+
+    /* ── Main split layout ──────────────────────────────────────── */
+    .main-split {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    .messages-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      background: #0f1419;
+    }
+
+    .side-panel {
+      width: 280px;
+      flex-shrink: 0;
+      overflow: hidden;
+      border-left: 1px solid #1f2937;
+    }
   `]
 })
-export class ChatComponent implements OnInit, AfterViewChecked {
+export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   @ViewChild('messagesContainer') private messagesContainer!: ElementRef;
 
   messages: Message[] = [];
@@ -688,7 +914,23 @@ export class ChatComponent implements OnInit, AfterViewChecked {
   isLoading = false;
   useHybridSearch = true;
   showCitations = true;
-  
+
+  // v2 stream toggles
+  useV2Stream = true;
+  hilEnabled = false;
+
+  // HIL state
+  hilInterrupt: HILInterruptPayload | null = null;
+  hilInput = '';
+
+  // Side panels
+  showActivityPanel = false;
+  showTimeline = false;
+  agentActivities: AgentActivityEntry[] = [];
+
+  // Session identity
+  currentSessionId: string = this._initSessionId();
+
   // Document ingestion properties
   showUploadPanel = false;
   uploadUrl: string = '';
@@ -704,40 +946,173 @@ export class ChatComponent implements OnInit, AfterViewChecked {
   ];
 
   private shouldScroll = true;
+  private subs = new Subscription();
 
   constructor(
     private aiStreamService: AIStreamService,
-    private ingestService: IngestService
-  ) { }
+    private agentStreamService: AgentStreamService,
+    private ingestService: IngestService,
+    private cdr: ChangeDetectorRef,
+  ) {}
 
   ngOnInit() {
-    // Subscribe to streaming updates
-    this.aiStreamService.streaming$.subscribe((token) => {
-      if (this.messages.length > 0) {
-        const lastMessage = this.messages[this.messages.length - 1];
-        if (lastMessage.role === 'assistant') {
-          lastMessage.content += token;
-          this.shouldScroll = true;
+    // ── v1 stream subscriptions (kept for backward compat) ────────
+    this.subs.add(
+      this.aiStreamService.streaming$.subscribe((token) => {
+        if (!this.useV2Stream && this.messages.length > 0) {
+          const lastIdx = this.messages.length - 1;
+          const last = this.messages[lastIdx];
+          if (last.role === 'assistant') {
+            const updated = { ...last, content: last.content + token };
+            this.messages = [
+              ...this.messages.slice(0, lastIdx),
+              updated,
+            ];
+            this.shouldScroll = true;
+            this.cdr.detectChanges();
+          }
         }
-      }
-    });
+      })
+    );
 
-    // Subscribe to loading state
-    this.aiStreamService.loading$.subscribe((loading) => {
-      this.isLoading = loading;
-      if (!loading && this.messages.length > 0) {
-        const lastMessage = this.messages[this.messages.length - 1];
-        lastMessage.isStreaming = false;
-      }
-    });
+    this.subs.add(
+      this.aiStreamService.loading$.subscribe((loading) => {
+        if (!this.useV2Stream) {
+          this.isLoading = loading;
+          if (!loading && this.messages.length > 0) {
+            const lastIdx = this.messages.length - 1;
+            if (this.messages[lastIdx].role === 'assistant') {
+              const updated = { ...this.messages[lastIdx], isStreaming: false };
+              this.messages = [...this.messages.slice(0, lastIdx), updated];
+            }
+          }
+          this.cdr.detectChanges();
+        }
+      })
+    );
 
-    // Subscribe to errors
-    this.aiStreamService.error$.subscribe((error) => {
-      if (error && this.messages.length > 0) {
-        const lastMessage = this.messages[this.messages.length - 1];
-        lastMessage.error = error;
-      }
-    });
+    this.subs.add(
+      this.aiStreamService.error$.subscribe((error) => {
+        if (!this.useV2Stream && error && this.messages.length > 0) {
+          const lastIdx = this.messages.length - 1;
+          const updated = { ...this.messages[lastIdx], error };
+          this.messages = [...this.messages.slice(0, lastIdx), updated];
+          this.cdr.detectChanges();
+        }
+      })
+    );
+
+    // ── v2 stream subscriptions ───────────────────────────────────
+    this.subs.add(
+      this.agentStreamService.fullMessage$.subscribe((text) => {
+        if (this.useV2Stream && this.messages.length > 0) {
+          const lastIdx = this.messages.length - 1;
+          if (this.messages[lastIdx].role === 'assistant') {
+            // Mutate the last message content in-place to avoid replacing the
+            // array reference — trackBy keeps the same DOM node alive.
+            this.messages[lastIdx] = { ...this.messages[lastIdx], content: text };
+            this.shouldScroll = true;
+            this.cdr.detectChanges();
+          }
+        }
+      })
+    );
+
+    this.subs.add(
+      this.agentStreamService.loading$.subscribe((loading) => {
+        if (this.useV2Stream) {
+          this.isLoading = loading;
+          if (!loading && this.messages.length > 0) {
+            const lastIdx = this.messages.length - 1;
+            if (this.messages[lastIdx].role === 'assistant') {
+              const updated = { ...this.messages[lastIdx], isStreaming: false };
+              this.messages = [...this.messages.slice(0, lastIdx), updated];
+            }
+          }
+          this.cdr.detectChanges();
+        }
+      })
+    );
+
+    this.subs.add(
+      this.agentStreamService.error$.subscribe((error) => {
+        if (this.useV2Stream && error && this.messages.length > 0) {
+          const lastIdx = this.messages.length - 1;
+          const updated = { ...this.messages[lastIdx], error };
+          this.messages = [...this.messages.slice(0, lastIdx), updated];
+          this.cdr.detectChanges();
+        }
+      })
+    );
+
+    this.subs.add(
+      this.agentStreamService.activity$.subscribe((activities) => {
+        this.agentActivities = activities;
+        this.cdr.detectChanges();
+      })
+    );
+
+    this.subs.add(
+      this.agentStreamService.hilInterrupt$.subscribe((hil) => {
+        this.hilInterrupt = hil;
+        this.hilInput = '';
+        this.cdr.detectChanges();
+      })
+    );
+  }
+
+  ngOnDestroy(): void {
+    this.subs.unsubscribe();
+    this.agentStreamService.cancelStream();
+  }
+
+  // ─── TrackBy ─────────────────────────────────────────────────────────────
+
+  trackByMessageId(_index: number, message: Message): string {
+    return message.id;
+  }
+
+  // ─── HIL handlers ────────────────────────────────────────────────────────
+
+  onHILApprove(): void {
+    this.agentStreamService.resolveHIL(true, this.hilInput);
+  }
+
+  onHILReject(): void {
+    this.agentStreamService.resolveHIL(false, this.hilInput);
+  }
+
+  // ─── Panel toggles ───────────────────────────────────────────────────────
+
+  toggleActivityPanel(): void {
+    this.showActivityPanel = !this.showActivityPanel;
+    if (this.showActivityPanel) this.showTimeline = false;
+  }
+
+  toggleTimeline(): void {
+    this.showTimeline = !this.showTimeline;
+    if (this.showTimeline) this.showActivityPanel = false;
+  }
+
+  // ─── Checkpoint / replay / branch ────────────────────────────────────────
+
+  onCheckpointBadgeClick(_checkpointId: string): void {
+    this.showTimeline = true;
+    this.showActivityPanel = false;
+  }
+
+  onReplayCheckpoint(checkpointId: string): void {
+    this._prepareAssistantPlaceholder();
+    this.agentStreamService.replayFromCheckpoint(this.currentSessionId, checkpointId);
+  }
+
+  onBranchCreated(branchSessionId: string): void {
+    // Switch to the new branch session
+    this.currentSessionId = branchSessionId;
+    localStorage.setItem('chat_session_id', branchSessionId);
+    this.messages = [];
+    this.agentActivities = [];
+    this.showTimeline = false;
   }
 
   /**
@@ -769,33 +1144,60 @@ export class ChatComponent implements OnInit, AfterViewChecked {
     this.userInput = '';
     this.shouldScroll = true;
 
-    // Add assistant placeholder
-    const assistantMessage: Message = {
-      id: (Date.now() + 1).toString(),
-      role: 'assistant',
-      content: '',
-      timestamp: new Date(),
-      isStreaming: true
-    };
-    this.messages.push(assistantMessage);
+    this._prepareAssistantPlaceholder();
 
-    // Trigger streaming
-    this.aiStreamService.streamChatResponse(
-      message,
-      undefined,
-      this.useHybridSearch
-    ).subscribe({
-      error: (err) => {
-        assistantMessage.error = err.message;
-      }
-    });
+    if (this.useV2Stream) {
+      // ── v2: LangGraph agent stream ─────────────────────────────
+      this.agentStreamService.sendMessage(message, this.currentSessionId, {
+        hilEnabled: this.hilEnabled,
+        hilThreshold: 0.5,
+      });
+    } else {
+      // ── v1: legacy RAG stream ──────────────────────────────────
+      const assistantMessage = this.messages[this.messages.length - 1];
+      this.aiStreamService.streamChatResponse(
+        message,
+        undefined,
+        this.useHybridSearch
+      ).subscribe({
+        error: (err) => {
+          assistantMessage.error = err.message;
+        }
+      });
+    }
   }
 
   /**
    * Stop ongoing stream
    */
   stopStreaming() {
-    this.aiStreamService.cancelStream();
+    if (this.useV2Stream) {
+      this.agentStreamService.cancelStream();
+    } else {
+      this.aiStreamService.cancelStream();
+    }
+  }
+
+  // ─── Private helpers ─────────────────────────────────────────────────────
+
+  private _prepareAssistantPlaceholder(): void {
+    const assistantMessage: Message = {
+      id: (Date.now() + 1).toString(),
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+      isStreaming: true,
+    };
+    this.messages.push(assistantMessage);
+  }
+
+  private _initSessionId(): string {
+    let sessionId = localStorage.getItem('chat_session_id');
+    if (!sessionId) {
+      sessionId = `session-${crypto.randomUUID()}`;
+      localStorage.setItem('chat_session_id', sessionId);
+    }
+    return sessionId;
   }
 
   /**

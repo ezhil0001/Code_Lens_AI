@@ -177,8 +177,12 @@ async def debug_generate_node(state: dict, config: RunnableConfig = None) -> dic
         if llm:
             from langchain_core.messages import HumanMessage, SystemMessage  # type: ignore
             messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-            ai_msg = await llm.ainvoke(messages)
-            response_text = getattr(ai_msg, "content", str(ai_msg))
+            chunks: list[str] = []
+            async for chunk in llm.astream(messages):
+                piece = getattr(chunk, "content", "")
+                if piece:
+                    chunks.append(piece)
+            response_text = "".join(chunks) or "[DebugAgent: empty response]"
     except Exception as exc:  # noqa: BLE001
         logger.warning("[debug_generate_node] LLM call failed: %s", exc)
 

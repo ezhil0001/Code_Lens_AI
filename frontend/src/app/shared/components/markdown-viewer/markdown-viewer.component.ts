@@ -1,4 +1,4 @@
-import { Component, Input, OnInit } from '@angular/core';
+import { Component, Input, OnInit, OnChanges, SimpleChanges, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MarkdownModule } from 'ngx-markdown';
 
@@ -10,6 +10,7 @@ import { MarkdownModule } from 'ngx-markdown';
 @Component({
   selector: 'app-markdown-viewer',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule, MarkdownModule],
   template: `
     <div class="markdown-content prose prose-invert max-w-none">
@@ -117,21 +118,30 @@ import { MarkdownModule } from 'ngx-markdown';
     .markdown-content :deep(.token.operator) { color: #ff7b72; }
   `]
 })
-export class MarkdownViewerComponent implements OnInit {
+export class MarkdownViewerComponent implements OnInit, OnChanges {
   @Input() content: string = '';
+
+  constructor(
+    private cdr: ChangeDetectorRef,
+    private el: ElementRef,
+  ) {}
 
   ngOnInit() {
     // Content loaded
   }
 
+  ngOnChanges(_changes: SimpleChanges): void {
+    // When content input changes, mark for check so OnPush picks it up.
+    this.cdr.markForCheck();
+  }
+
   /**
-   * Called when markdown finishes rendering
-   * Trigger Prism.js syntax highlighting
+   * Called when markdown finishes rendering.
+   * Scoped to THIS component's host element — never touches sibling components.
    */
   onMarkdownReady() {
-    // Trigger Prism.js highlight on all code blocks
     if (typeof window !== 'undefined' && (window as any).Prism) {
-      (window as any).Prism.highlightAllUnder(document.querySelector('.markdown-content'));
+      (window as any).Prism.highlightAllUnder(this.el.nativeElement);
     }
   }
 }

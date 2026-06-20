@@ -2,9 +2,14 @@
 Pydantic Schemas for API request/response validation
 """
 
-from pydantic import BaseModel, EmailStr, Field, validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, validator
 from typing import List, Optional
 from datetime import datetime
+import re
+
+# Minimal email pattern — accepts any user@domain format including .local,
+# .internal, and other special-use TLDs that email-validator 2.x rejects.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 # ==================== User Schemas ====================
@@ -136,9 +141,23 @@ class APIKeyListResponse(BaseModel):
 # ==================== Authentication Schemas ====================
 
 class LoginRequest(BaseModel):
-    """Login request"""
-    email: EmailStr
+    """Login request.
+
+    Uses a plain str for ``email`` instead of Pydantic's ``EmailStr`` so that
+    non-public TLDs (.local, .internal, .test, corporate intranets) are
+    accepted.  email-validator ≥ 2.1 rejects those domains at parse time,
+    causing a 422 before the route function is ever reached.
+    """
+    email: str = Field(..., description="User email address")
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def _email_format(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not _EMAIL_RE.match(v):
+            raise ValueError("Invalid email format")
+        return v
 
 
 class TokenResponse(BaseModel):

@@ -30,24 +30,39 @@ logger = logging.getLogger(__name__)
 # DSN helpers                                                                 #
 # --------------------------------------------------------------------------- #
 def build_psycopg_dsn() -> str:
-    """Return a psycopg-compatible DSN (NOT the SQLAlchemy URL).
+    """Return a psycopg-compatible DSN.
 
-    Honors `POSTGRES_DSN` / `DATABASE_URL` overrides, otherwise composes
-    from `POSTGRES_*` env vars. Strips SQLAlchemy-specific prefixes
-    (`postgresql+psycopg2://`) which `psycopg` does not understand.
+    Priority order:
+    1. Individual POSTGRES_* vars — special chars in passwords are
+       automatically percent-encoded so '@', '#', '!' etc. work correctly.
+    2. POSTGRES_DSN explicit override (caller is responsible for encoding).
+    3. DATABASE_URL fallback — strips SQLAlchemy prefixes.
     """
-    dsn = os.getenv("POSTGRES_DSN") or os.getenv("DATABASE_URL")
-    if dsn:
-        return (
-            dsn.replace("postgresql+psycopg2://", "postgresql://")
-            .replace("postgresql+psycopg://", "postgresql://")
-        )
-    host = os.getenv("POSTGRES_HOST", "localhost")
+    from urllib.parse import quote_plus
+
+    # 1. Prefer individual vars — encode password to handle special chars
+    host = os.getenv("POSTGRES_HOST")
     port = os.getenv("POSTGRES_PORT", "5432")
-    user = os.getenv("POSTGRES_USER", "postgres")
-    password = os.getenv("POSTGRES_PASSWORD", "postgres")
-    db = os.getenv("POSTGRES_DB", "codelens_ai")
-    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    db = os.getenv("POSTGRES_DB")
+    if host and user and password and db:
+        return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
+
+    # 2. Explicit DSN override
+    dsn = os.getenv("POSTGRES_DSN")
+    if dsn:
+        return dsn
+
+    # 3. DATABASE_URL — strip SQLAlchemy driver prefixes
+    url = os.getenv("DATABASE_URL")
+    if url:
+        return (
+            url.replace("postgresql+psycopg2://", "postgresql://")
+               .replace("postgresql+psycopg://", "postgresql://")
+        )
+
+    return "postgresql://postgres:postgres@localhost:5432/codelens_ai"
 
 
 # --------------------------------------------------------------------------- #
