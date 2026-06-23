@@ -1,12 +1,14 @@
-"""Phase 3: Agentic Router.
+"""
+AgenticRouter — keyword-rule classifier used by the v1 AgentBrain pipeline.
 
-Intelligent router that decides:
-1. Whether to query codebase, KT documentation, or both
-2. Which retrieval strategy to use (based on Phase 2 intent detection)
-3. Whether to invoke specialized tools
-4. How to combine multiple sources
+Classifies incoming queries into retrieval strategies (CODEBASE_ONLY,
+KT_ONLY, HYBRID, etc.) and translates those decisions into ChromaDB
+metadata filters and retrieval weights.
 
-Routes incoming queries to the most appropriate retrieval and processing path.
+The LangGraph intent_classifier_node duplicates the core classification
+logic without importing this class so the graph doesn't drag in the full
+v1 pipeline at startup.  Any changes to routing rules should be applied
+to both places until the v1 endpoint is retired.
 """
 
 import logging

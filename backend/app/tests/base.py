@@ -1,26 +1,25 @@
 """
-Phase Test Base Classes & Types
-================================
-Defines the contract every phase test module must follow.
+Startup test base types — contract that every test module must implement.
 
-Usage
------
+Each module under app/tests/ exports PHASE_ID, PHASE_NAME, and TESTS.
+The runner discovers and executes them automatically; no registration needed.
+
     from app.tests.base import PhaseTest, TestResult, TestStatus
 
-    async def my_check() -> TestResult:
+    async def _check_something() -> TestResult:
         try:
-            assert 1 + 1 == 2
-            return TestResult.passed("arithmetic works")
+            assert something_works()
+            return TestResult.passed("description of what passed")
         except AssertionError as e:
             return TestResult.failed(str(e))
 
     TESTS = [
         PhaseTest(
-            id="PHASEXY-001",
-            name="Basic arithmetic",
-            description="Verifies that 1+1=2",
-            run=my_check,
-            critical=True,       # if True, phase is marked FAILED on this test's failure
+            id="XY-001",
+            name="Something works",
+            description="One-line description of what is being checked",
+            run=_check_something,
+            critical=True,   # marks the whole group FAILED if this test fails
             tags=["sanity"],
         )
     ]

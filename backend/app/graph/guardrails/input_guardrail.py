@@ -1,28 +1,22 @@
 """
-Input Guardrail Node — Phase F: F-30, F-31, F-32, F-33
-=======================================================
-A LangGraph node that runs before any retrieval or agent work and
-applies a chain of ordered safety checks.
+Input guardrail node — safety gate that runs before retrieval or any LLM work.
 
-Check chain (in order):
-  1. PromptInjectionDetector  — severity: block
-  2. TokenBudgetCheck         — severity: block
-  3. PIIScrubber              — severity: scrub (continues with clean query)
+Applies three ordered checks.  Earlier checks can short-circuit the rest:
 
-If a "block" check fails, guardrail_passed is set to False and
-final_response is pre-filled with a rejection message — the graph
-short-circuits at the cache_check/memory_read stage.
+  1. PromptInjectionDetector — blocks queries that attempt to override the
+     system prompt or escape the assistant persona.  Severity: block.
 
-If only "scrub" checks fire, the graph continues with the sanitized
-query in state["pii_scrubbed_query"] and state["query"].
+  2. TokenBudgetCheck — blocks queries longer than 512 tokens to prevent
+     context-overflow attacks and accidental prompt stuffing.  Severity: block.
 
-Tested by:
-  F-001  input_guardrail_node found in this module
-  F-002  PromptInjectionDetector blocks known injection strings
-  F-003  TokenBudgetCheck blocks queries > 512 tokens
-  F-004  Safe query passes guardrail_passed=True
-  F-005  PIIScrubber anonymizes email addresses
-  F-006  PIIScrubber anonymizes phone numbers
+  3. PIIScrubber — replaces recognized PII (email, phone, SSN, CC) with
+     typed placeholders before the query reaches the retriever or LLM.
+     The graph continues with the scrubbed text; originals are never logged.
+     Severity: scrub.
+
+On a "block" result, guardrail_passed is set False and final_response is
+pre-filled with a rejection message so the graph can short-circuit directly
+to the response node without touching retrieval or agents.
 """
 
 from __future__ import annotations

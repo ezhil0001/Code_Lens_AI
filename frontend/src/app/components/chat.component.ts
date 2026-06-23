@@ -1,13 +1,9 @@
 /**
- * Phase 4: Chat Component - Angular UI
+ * Legacy chat component — backs the /components/chat route used by the v1
+ * ChatService + SessionService stack.  New feature work goes into
+ * features/chat/components/chat.component.ts which uses the v2 agent stream.
  *
- * Reactive UI for real-time chat with:
- * - Stream rendering (tokens appear as they arrive)
- * - Sources accordion (Phase 3 metadata)
- * - Code syntax highlighting (prismjs)
- * - Markdown rendering (ngx-markdown)
- * - Copy code buttons
- * - Reference links
+ * This component will be removed once the v2 chat is the only route.
  */
 
 import {

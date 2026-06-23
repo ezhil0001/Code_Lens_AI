@@ -1,25 +1,18 @@
 """
-Long-Term Memory Store — Phase C: F-13, F-17
-==============================================
-A pgvector-backed store for cross-session user and code facts.
+Long-term memory store — pgvector-backed cross-session fact retrieval.
 
-Security invariant (C-010):
-  Every query is scoped to a single user_id via WHERE user_id = $1.
-  There is NO code path that retrieves memories across user boundaries.
+Each entry represents a fact extracted from a past conversation: a module
+the user was debugging, a preference they stated, an architectural decision
+they described.  At query time the store returns the top-k facts most
+similar to the current query so the agent has relevant context without the
+user having to repeat themselves across sessions.
 
-Schema (created by ltm_migration.py):
-  agent_long_term_memory (
-      id            BIGSERIAL PRIMARY KEY,
-      user_id       TEXT NOT NULL,
-      org_id        TEXT,
-      content       TEXT NOT NULL,
-      entity_type   TEXT NOT NULL DEFAULT 'user_fact',
-      embedding     VECTOR(768) NOT NULL,
-      source_session TEXT,
-      created_at    TIMESTAMPTZ DEFAULT NOW(),
-      last_accessed TIMESTAMPTZ DEFAULT NOW(),
-      access_count  INTEGER DEFAULT 1
-  )
+Hard security rule: every SELECT is scoped to a single user_id.  There is
+no code path that returns rows from a different user.  This is enforced at
+the SQL level (WHERE user_id = $1) and verified in the startup test suite.
+
+Schema lives in the ltm_migration script.  The VECTOR(768) dimension matches
+all-mpnet-base-v2, which is also used for retrieval embeddings.
 """
 
 from __future__ import annotations

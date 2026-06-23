@@ -1,25 +1,18 @@
 """
-Postgres Checkpointer — Phase D: F-19, F-20
-=============================================
-Wraps LangGraph's AsyncPostgresSaver (or MemorySaver as fallback) and
-provides thread-ID helpers that enforce the same namespace convention used
-by the memory layer ({user_id}::{session_id}).
+Graph checkpointer — wraps AsyncPostgresSaver with a MemorySaver fallback.
 
-Design rules:
-  - get_checkpointer() is the single factory.  It returns:
-      1. AsyncPostgresSaver backed by the shared pg_pool (production).
-      2. MemorySaver (in-process) when Postgres is unavailable — allows
-         the server and all tests to start without a running DB.
-  - build_thread_id() and build_branch_thread_id() are tested by D-008/D-009.
-  - The singleton is process-wide; concurrent requests share one saver.
-  - setup() (DDL) is called lazily on first use, not at import time.
+LangGraph persists the full AgentState after every node via the checkpointer.
+This enables two things: resuming a paused graph after a HIL interrupt, and
+time-travel replay from any historical checkpoint.
 
-Tested by:
-  D-001  pg_checkpointer importable + get_checkpointer present
-  D-002  get_checkpointer() returns a *Saver instance
-  D-003  graph.checkpointer is not None
-  D-008  build_thread_id('u','s') == 'u::s'
-  D-009  build_branch_thread_id contains 'branch' and parent thread
+The factory returns AsyncPostgresSaver when Postgres is reachable and falls
+back to an in-process MemorySaver when it is not.  The fallback lets the
+server start and serve requests without a running database — checkpoints are
+lost on restart but the conversation still works.
+
+build_thread_id() and build_branch_thread_id() enforce the same
+"{user_id}::{session_id}" namespace used by the memory layer so checkpoint
+keys and memory keys are always co-located per user.
 """
 
 from __future__ import annotations

@@ -1,23 +1,25 @@
 """
-CodeAgent Sub-Graph — Phase B: F-05, F-56
-==========================================
-A compiled StateGraph that encapsulates the full code-retrieval and
-generation pipeline for code-domain queries.
+CodeAgent — handles queries about source code: function lookups, implementation
+explanations, usage examples, and class-level analysis.
 
-Node sequence:
-  code_expand_query_node  → expand query for better recall
-  code_retrieve_node      → BM25 + ChromaDB (file_type=code)
-  code_rerank_node        → BGE cross-encoder top-5
-  code_pdr_node           → Parent Document Retrieval (full function bodies)
-  code_truncate_node      → safe truncation (MAX_CHARS_PER_SOURCE = 8_000)
-  code_generate_node      → LLM generation with code-focused few-shot prompt
+Retrieval pipeline:
+  code_expand_query_node  → rewrites the query for better lexical recall
+  code_retrieve_node      → BM25 + ChromaDB with file_type=code filter
+  code_rerank_node        → BGE cross-encoder narrows to top-5 chunks
+  code_pdr_node           → swaps chunk fragments for their parent function bodies
+  code_truncate_node      → caps each source at 8 000 chars to stay within LLM context
+  code_generate_node      → streams the LLM response token-by-token
 
-Design invariants:
-  - metadata_filter is READ from state (set by intent_classifier_node), NEVER set here.
-  - RetrieverEngine.retrieve() is called inside threading.Lock() — existing fix preserved.
-  - Output written to state["agent_responses"]["CodeAgent"] and state["sources"].
-  - All node names prefixed code_* to avoid collisions with other agents.
-  - CancelledError propagates — never swallowed.
+The metadata_filter is set upstream by the intent classifier and must not be
+overwritten here.  Changing it would break multi-agent HYBRID queries that
+intentionally omit a filter to search across all file types.
+
+RetrieverEngine.retrieve() runs inside a threading.Lock() because ChromaDB's
+Python client is not thread-safe.  Do not remove that lock.
+
+Node names are all prefixed `code_` to avoid key collisions when the supervisor
+adds multiple agents to the same StateGraph.
+"""
 """
 
 from __future__ import annotations

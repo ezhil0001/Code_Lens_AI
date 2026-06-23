@@ -1,14 +1,18 @@
 """
-DebugAgent Sub-Graph — Phase B: F-07
-======================================
-Specialized agent for error diagnosis, stack trace analysis, and fix suggestions.
+DebugAgent — handles error diagnosis, stack trace analysis, and fix suggestions.
+
+The distinguishing step is `debug_parse_error_node`, which extracts structured
+error metadata (error type, file path, line number) from the query text before
+hitting the retriever.  This makes the subsequent retrieval query much more
+precise — instead of searching for the raw error message, we search near the
+specific file and function that raised it.
 
 Node sequence:
-  debug_parse_error_node     → extract {error_type, file_path, line_number}
-  debug_retrieve_node        → code_search filtered to error-adjacent code
-  debug_pattern_node         → BM25 search for known error patterns
-  debug_dependency_node      → find callers of the failing function
-  debug_generate_node        → root-cause analysis + fix suggestion
+  debug_parse_error_node  → extract {error_type, file_path, line_number}
+  debug_retrieve_node     → code search scoped around the failing code
+  debug_pattern_node      → BM25 scan of known error patterns in the corpus
+  debug_dependency_node   → find callers of the failing function
+  debug_generate_node     → root-cause analysis with optional fix suggestion
 """
 
 from __future__ import annotations

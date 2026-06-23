@@ -1,26 +1,22 @@
 """
-Output Guardrail Node — Phase F: F-34, F-35, F-36
-==================================================
-A LangGraph node that runs after agents produce final_response, before
-the response is streamed to the client.
+Output guardrail node — last safety check before the response is streamed.
 
-Check chain (in order):
-  1. CodeSafetyScanner  — severity: block — scans code blocks for dangerous
-     shell / SQL / Python patterns (rm -rf, eval, exec, DROP TABLE, etc.)
-  2. PIILeakScanner     — severity: scrub — re-runs PII detection on the
-     generated response to catch cases where the LLM echoed back PII
-     from retrieved chunks.
-  3. CitationVerifier   — severity: warn — annotates claims that have no
-     supporting source in reranked_chunks.
+Runs after agents have written final_response and before the SSE emitter
+sends anything to the browser.  Three checks in order:
 
-If a "block" check fails, final_response is replaced with a safety
-rejection and guardrail_passed is set to False.
+  1. CodeSafetyScanner — blocks responses containing dangerous shell/SQL/
+     Python patterns in code blocks (rm -rf, eval, exec, DROP TABLE without
+     WHERE, etc.).  Severity: block.  The scanner only inspects fenced code
+     blocks so normal prose that mentions these strings is unaffected.
 
-Tested by:
-  F-007  output_guardrail_node found in this module
-  F-008  CodeSafetyScanner blocks rm -rf
-  F-009  CodeSafetyScanner blocks eval()
-  F-010  CodeSafetyScanner allows safe code
+  2. PIILeakScanner — re-runs Presidio on the generated response.  Needed
+     because the LLM occasionally echoes PII that appeared in retrieved
+     chunks even when the input was already scrubbed.  Severity: scrub.
+
+  3. CitationVerifier — computes cosine similarity between each claim
+     sentence and the reranked_chunks.  Claims below the 0.3 threshold
+     receive a ⚠️ annotation rather than being removed, so the user can
+     judge the grounding themselves.  Severity: warn.
 """
 
 from __future__ import annotations

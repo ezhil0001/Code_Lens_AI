@@ -21,13 +21,11 @@ import { SessionService } from './core/services/session.service';
 export class AppComponent implements OnInit {
   title = 'CodeLens AI';
 
-  constructor(private sessionService: SessionService) {
-    console.log('🚀 AppComponent initialized');
-  }
+  constructor(private sessionService: SessionService) {}
 
   ngOnInit(): void {
-    console.log('📌 AppComponent ngOnInit - initializing session');
-    // SessionService is injected and automatically initializes session
-    // This happens on app startup to recover chat history on refresh
+    // SessionService initializes the session on construction, but injecting it
+    // here also ensures it is eagerly created at app startup rather than lazily
+    // on the first route that needs it — important for session recovery on page refresh.
   }
 }

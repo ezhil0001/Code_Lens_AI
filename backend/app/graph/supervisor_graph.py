@@ -1,56 +1,24 @@
 """
-Supervisor Graph — Root LangGraph StateGraph (Phase A: F-02, F-04 | Phase B: F-10)
-====================================================================================
-Wires all node stubs and agent sub-graphs together into the Supervisor
-StateGraph.  Phase A ships stubs for nodes that will be implemented in
-later phases — each stub is a valid async node that logs and returns
-an unchanged (empty) state delta so the graph compiles and runs.
+Supervisor graph — root StateGraph that orchestrates the full query pipeline.
 
-Node execution sequence (full pipeline):
-  __start__
-      │
-      ▼
-  input_guardrail_node       (Phase F — stub for now)
-      │
-      ▼
-  cache_check_node           (Phase G — stub for now)
-      │  HIT ────────────────────────────────────────► response_node
-      │  MISS
-      ▼
-  memory_read_node           (Phase C — stub for now)
-      │
-      ▼
-  intent_classifier_node     (Phase A — IMPLEMENTED)
-      │
-      ├── "CodeAgent"  ──────► code_agent_node   (Phase B — stub)
-      ├── "DocAgent"   ──────► doc_agent_node    (Phase B — stub)
-      ├── "DebugAgent" ──────► debug_agent_node  (Phase B — stub)
-      ├── "ArchAgent"  ──────► arch_agent_node   (Phase B — stub)
-      └── "WebAgent"   ──────► web_agent_node    (Phase B — stub)
-              │
-              ▼
-      synthesizer_node       (Phase B — stub)
-              │
-              ▼
-      hil_check_node         (Phase E — stub)
-              │
-              ▼
-      output_guardrail_node  (Phase F — stub)
-              │
-              ▼
-      response_node          (Phase G — stub)
-              │
-              ▼
-          __end__
+Entry point for every v2 chat request.  Builds the graph once at startup and
+reuses the compiled instance across all requests via get_supervisor_graph().
 
-IMPORTANT DESIGN RULES (preserved across all phases)
------------------------------------------------------
-1. Every node is a pure async function: (state: dict, config: dict) -> dict.
-2. Nodes return ONLY the fields they changed — never the full state.
-3. `query` is set at entry and never modified by downstream nodes.
-4. `session_id` is always the namespaced "{user_id}::{raw_session_id}" form.
-5. CancelledError must propagate — never catch bare `except Exception` in
-   streaming contexts.
+Node execution order:
+  input_guardrail_node  → safety checks (injection, PII, token budget)
+  cache_check_node      → semantic cache lookup; hit → skip to response_node
+  memory_read_node      → load STM window + LTM facts
+  intent_classifier_node → classify query, set routing_decision + metadata_filter
+  [agent nodes]         → CodeAgent / DocAgent / DebugAgent / ArchAgent / WebAgent
+  synthesizer_node      → merge multi-agent outputs; single-agent is a pass-through
+  hil_check_node        → pause for human review if conditions are met
+  output_guardrail_node → code safety scan + PII leak scan + citation warnings
+  response_node         → assemble final SSE payload, write to cache + memory
+
+Conditional routing at intent_classifier_node dispatches to the correct
+agent based on routing_decision.  HYBRID queries go through CodeAgent first;
+the supervisor can be extended to run agents in parallel via the Send API
+when that latency becomes a bottleneck.
 """
 
 from __future__ import annotations
@@ -83,9 +51,10 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase A stubs — minimal async nodes that pass state unchanged.
-# Each stub will be replaced with a real implementation in the phase
-# documented in its docstring.
+# Lightweight pass-through nodes for pipeline stages that have not yet been
+# wired to a real implementation.  Each returns an empty dict so the graph
+# compiles and produces valid checkpoints — useful for testing routing logic
+# without requiring every service to be running.
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _stub_node(name: str, state: dict, config: RunnableConfig) -> dict:

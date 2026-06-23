@@ -1,11 +1,8 @@
 /**
- * Phase 4: Chat Service - Angular Integration
+ * ChatService — SSE-based streaming client for the v1 /api/v1/chat/stream endpoint.
  *
- * Handles communication with FastAPI backend:
- * - Stream management via Server-Sent Events (SSE)
- * - Session tracking
- * - Cache interaction
- * - Error handling with reconnection
+ * Used only by the legacy ChatComponent.  The v2 agent stream path uses
+ * AgentStreamService instead.  Do not add new features here.
  */
 
 import { Injectable } from '@angular/core';

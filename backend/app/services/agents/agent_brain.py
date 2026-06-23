@@ -1,15 +1,14 @@
-"""Phase 3: Agent Brain - Main Orchestrator.
+"""
+AgentBrain — v1 RAG orchestrator, kept as a compatibility shim for the
+/api/v1/chat/stream endpoint.
 
-Orchestrates the entire RAG pipeline:
-1. Query → Agentic Router → Decision (codebase, KT, both, or tool)
-2. Retrieve from Phase 2 (using dynamic weights from Phase 2 optimization)
-3. Select Few-Shot examples
-4. Build prompt
-5. Call LLM with streaming
-6. Store in memory (PostgreSQL)
-7. Return response to user
+All new query handling goes through the LangGraph supervisor graph
+(app.graph.supervisor_graph).  This class still owns the Groq streaming
+path, SemanticCache lookup, and the PostgresChatMessageHistory writes for
+v1 sessions.  It will be removed once all clients have migrated to v2.
 
-This is the "Brain" that ties everything together for intelligent response generation.
+Do not add new features here.  If you need to change retrieval behavior,
+do it in the relevant agent sub-graph instead.
 """
 
 import logging

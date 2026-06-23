@@ -1,20 +1,21 @@
 """
-Intent Classifier Node — LangGraph node (Phase A: F-03)
-=========================================================
-Replaces the monolithic AgenticRouter with a pure, stateless LangGraph node.
+Intent classifier node — maps the user's query to a routing decision and the
+corresponding ChromaDB metadata filter.
 
-Routing decision → agent name mapping:
-  CODEBASE_ONLY  → CodeAgent   (metadata_filter: {"file_type": "code"})
-  KT_ONLY        → DocAgent    (metadata_filter: {"file_type": "kt_doc"})
-  HYBRID         → CodeAgent   (metadata_filter: None — no filter for hybrid)
-  MULTI_SOURCE   → CodeAgent   (metadata_filter: None)
-  AGENT_TOOL     → DebugAgent  (metadata_filter: None)
-  CONTEXT_AWARE  → CodeAgent   (metadata_filter: None — context-aware, use both)
+Routing table:
+  CODEBASE_ONLY  → CodeAgent   (filter: {"file_type": "code"})
+  KT_ONLY        → DocAgent    (filter: {"file_type": "kt_doc"})
+  HYBRID         → CodeAgent   (no filter — retrieves from both collections)
+  MULTI_SOURCE   → CodeAgent   (no filter)
+  AGENT_TOOL     → DebugAgent  (no filter)
+  CONTEXT_AWARE  → CodeAgent   (no filter — falls back to broad retrieval)
   DEBUG_*        → DebugAgent
   ARCHITECTURE   → ArchAgent
 
-Every change to the routing logic must preserve the user_id::session_id
-namespace invariant (the caller already built the namespaced session_id).
+The keyword rules here intentionally mirror the legacy AgenticRouter logic
+so existing test queries still route the same way.  Importing AgenticRouter
+itself is avoided because it carries the full legacy pipeline as a side
+effect of construction.
 """
 
 from __future__ import annotations

@@ -1,13 +1,13 @@
 """
-ArchAgent Sub-Graph — Phase B: F-08
-=====================================
-Architecture and system design questions — hybrid retrieval across
-both code AND documentation simultaneously.
+ArchAgent — handles system design, cross-component data-flow, and ADR questions.
 
-Key characteristic:
-  - Uses None metadata_filter (no restriction — queries both collections)
-  - LLM prompt instructs synthesis of data-flow narrative
-  - All node names prefixed arch_*
+Uses no metadata filter so retrieval spans both the code and documentation
+collections simultaneously.  Architecture questions typically require context
+from both sides: the actual implementation details from source files and the
+rationale or diagrams from design documents.  The LLM prompt explicitly asks
+for a narrative that ties the two together rather than listing unrelated chunks.
+
+Node names are prefixed `arch_` to avoid key collisions in the supervisor graph.
 """
 
 from __future__ import annotations

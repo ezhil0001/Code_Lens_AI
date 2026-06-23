@@ -1,31 +1,24 @@
 """
-Streaming Layer — Phase A: F-39, F-40
-=======================================
-Replaces the raw SSE generator with a structured LangGraph event-stream
-consumer that maps graph events to typed SSEEvent envelopes.
+SSE streaming layer — consumes graph.astream_events() and emits typed
+Server-Sent Event envelopes to the browser.
 
-SSE Event Types (8 total):
-  token        — LLM streaming token
-  tool_call    — Tool invocation started
-  tool_result  — Tool invocation completed
-  agent_switch — Graph entered a new agent sub-graph
-  checkpoint   — A graph node completed and state was checkpointed
-  interrupt    — HIL interrupt (graph paused, awaiting human input)
-  done         — Graph execution completed
-  error        — Fatal error during graph execution
+Each SSE message carries a JSON envelope so the Angular client can handle
+different event kinds without string-matching token content:
 
-Envelope schema (JSON-serialised in the SSE data field):
-  {
-    "type":          str,   // one of the 8 event types above
-    "data":          any,   // payload varies by type
-    "agent":         str,   // which agent/node emitted this event
-    "checkpoint_id": str,   // run_id from LangGraph (proxy for checkpoint)
-    "ts":            float  // unix timestamp in milliseconds
-  }
+  token        — one LLM output chunk; content field holds the text fragment
+  tool_call    — a tool was invoked; data includes tool name and sanitized input
+  tool_result  — tool returned; data includes a 200-char result preview
+  agent_switch — the supervisor handed off to a specialist sub-graph
+  checkpoint   — a node finished and its state was persisted
+  interrupt    — the graph paused for human review (HIL)
+  done         — graph execution completed; client can finalize the message
+  error        — fatal error; client shows the error message and stops
 
-Usage:
-    async for sse_string in stream_graph_events(graph, state, config):
-        yield sse_string          # already formatted as "data: ...\n\n"
+The `_streamed_run_ids` set inside stream_graph_events() prevents
+on_chain_end from emitting final_response as a duplicate token event when
+the LLM already streamed individual chunks.  Without this guard, long
+responses would appear twice — once token-by-token and again as a bulk
+emission when the chain closes.
 """
 
 from __future__ import annotations

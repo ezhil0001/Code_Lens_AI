@@ -1,18 +1,19 @@
 """
-Short-Term Memory (STM) — Phase C: F-12
-=========================================
-Loads the last N conversation turns from PostgresChatMessageHistory and
-injects them into AgentState as state["short_term_window"].
+Short-term memory node — loads the recent conversation window into graph state.
 
-Key design rules:
-  - Session ID MUST be the namespaced value "{user_id}::{raw_session_id}".
-    This is a security fix carried over from the monolithic AgentBrain —
-    never pass a bare session_id to the history store.
-  - Window size is configurable (default 10 turns).
-  - Token budget guard: if combined window > max_tokens (default 4096 words),
-    oldest turns are trimmed via apply_token_budget() before state injection.
-  - The node is resilient: if history load fails, it returns an empty window
-    rather than propagating the error (conversation can still proceed).
+Loads the last N turns from PostgresChatMessageHistory and injects them into
+AgentState["short_term_window"] so downstream nodes have turn-by-turn context
+without re-querying the database.
+
+Two constraints that must not be relaxed:
+  - session_id must be the namespaced "{user_id}::{raw_session_id}" form.
+    A bare session_id would let one user's history bleed into another's.
+  - If the window exceeds STM_MAX_TOKENS words, the oldest turns are trimmed
+    rather than passed verbatim.  Large history windows caused context-length
+    errors with the Groq API at ~12k tokens before this guard was added.
+
+The node is resilient by design: a history load failure returns an empty
+window so the graph can still answer the current query cold.
 """
 
 from __future__ import annotations

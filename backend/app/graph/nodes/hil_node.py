@@ -1,33 +1,24 @@
 """
-Human-in-the-Loop (HIL) Check Node — Phase E: F-24
-=====================================================
-Intercepts the graph at a well-defined gate before the synthesizer and
-decides whether a human must review or approve the pending action.
+Human-in-the-Loop (HIL) check node — gates the response when the agent is
+uncertain or when the query signals a potentially destructive operation.
 
-HIL is triggered when ANY of these conditions is true:
-  1. Routing confidence is below HIL_CONFIDENCE_THRESHOLD  (default 0.55)
-  2. The original query contains destructive-intent keywords
-     (e.g. "drop table", "delete everything", "remove all")
+HIL interrupts on any of these conditions:
+  1. routing_confidence is below HIL_CONFIDENCE_THRESHOLD (default 0.55).
+     Low confidence means the classifier wasn't sure which agent to use,
+     which often correlates with ambiguous or multi-domain queries where an
+     automatic answer could be wrong or misleading.
+  2. The query contains destructive-intent keywords such as "drop table",
+     "delete everything", or "remove all".  We'd rather ask once than have
+     the user act on an answer that misunderstood their scope.
 
-If HIL is NOT required the node is a transparent pass-through — zero
-latency, zero LLM cost.
+When HIL is not triggered the node is a transparent pass-through — it adds
+one dict assignment to the state and exits.
 
-If HIL IS required:
-  - hil_required is set to True
-  - hil_reason describes why the interrupt was raised
-  - The graph is expected to raise a NodeInterrupt so LangGraph pauses
-    execution at this checkpoint.  The human then calls
-    POST /api/v2/sessions/{session_id}/resume with their decision.
-  - hil_approved / hil_human_input are populated by the resume handler
-    before the graph is re-invoked.
-
-Tested by:
-  E-001  hil_node importable, hil_check_node found
-  E-002  hil_required=True when routing_confidence < threshold
-  E-003  hil_required=True on destructive keywords
-  E-004  hil_required=False on safe high-confidence query
-  E-005  nodes_visited updated after execution
-  E-009  contains_destructive_intent() detects risky keywords
+When HIL is triggered, the node sets hil_required=True and raises a
+NodeInterrupt so LangGraph persists the checkpoint and halts.  The user
+then calls POST /api/v2/sessions/{session_id}/resume with their decision.
+The resume handler writes hil_approved and hil_human_input back into the
+checkpoint before re-invoking the graph from this node.
 """
 
 from __future__ import annotations

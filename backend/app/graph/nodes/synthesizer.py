@@ -1,15 +1,14 @@
 """
-Synthesizer Node — Phase B: F-11
-==================================
-Merges outputs from one or more agent sub-graphs into a single coherent response.
+Synthesizer node — merges agent outputs into the final response.
 
-Single-agent path (most queries):
-  - Copies agent_responses[active_agent] → final_response verbatim.
-  - Zero LLM cost.
+Single-agent path (the common case):
+  Directly promotes agent_responses[active_agent] to final_response.
+  No LLM call, zero extra token cost.
 
-Multi-agent path (HYBRID routing):
-  - Deduplicates sources by 'id'.
-  - Calls LLM with synthesis prompt to merge N partial answers.
+Multi-agent path (HYBRID routing where multiple agents ran):
+  Deduplicates sources by 'id', then asks the LLM to write a single
+  coherent answer that doesn't repeat itself across the partial answers.
+  Only reached when HYBRID routing dispatched more than one sub-graph.
 """
 
 from __future__ import annotations
@@ -99,8 +98,12 @@ async def synthesizer_node(state: dict, config: RunnableConfig = None) -> dict:
         llm = getattr(factory, "get_llm", lambda: None)()
         if llm:
             from langchain_core.messages import HumanMessage  # type: ignore
-            ai_msg = await llm.ainvoke([HumanMessage(content=synthesis_prompt)])
-            final_response = getattr(ai_msg, "content", combined_text)
+            chunks: list[str] = []
+            async for chunk in llm.astream([HumanMessage(content=synthesis_prompt)]):
+                piece = getattr(chunk, "content", "")
+                if piece:
+                    chunks.append(piece)
+            final_response = "".join(chunks) or combined_text
     except Exception as exc:  # noqa: BLE001
         logger.warning("[synthesizer_node] LLM synthesis failed: %s — using concatenation", exc)
 

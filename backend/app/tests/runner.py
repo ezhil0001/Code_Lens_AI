@@ -1,16 +1,19 @@
 """
-Startup Test Runner
-====================
-Discovers all phase test packages, runs them sequentially at startup,
-and writes a structured pass/fail report to the application logger.
+Startup test runner — validates critical application components at boot time.
 
-Called from  app/main.py  inside the lifespan context manager:
+Discovers all test packages under app/tests/, runs them sequentially, and
+writes a structured pass/fail report to the application logger.  Failures
+are visible in the terminal immediately after startup so broken deployments
+are caught before the first real request is served.
+
+Called from app/main.py inside the lifespan context manager after the RAG
+pipeline is pre-warmed:
 
     from app.tests.runner import StartupTestRunner
     await StartupTestRunner.run_all()
 
-Environment variable:
-    STARTUP_TESTS_ENABLED  (default "true")  — set to "false" to skip in prod.
+Environment:
+    STARTUP_TESTS_ENABLED   (default "true")  — set "false" to skip in prod.
     STARTUP_TESTS_FAIL_FAST (default "false") — abort on first critical failure.
 """
 

@@ -1,14 +1,10 @@
-"""Development/test mock responses for AgentBrain.
+"""
+Fallback response strings for AgentBrain when no LLM client is configured.
 
-P2 #11 cleanup: this content used to live inline in `agent_brain.py`,
-which (a) bloated the production module by ~100 lines and (b) risked
-shipping demo answers to real users when the LLM client was misconfigured.
-
-Now:
-  - Mock paths are isolated here.
-  - `AgentBrain._mock_response()` only ever returns these strings if the
-    `DEBUG` setting is true (or the LLM client is genuinely missing).
-  - In production we raise instead of silently masking the failure.
+Isolated here so the mock strings don't bloat agent_brain.py and so they
+can never accidentally escape to production — AgentBrain._mock_response()
+is only called when settings.DEBUG is True or the LLM client is None.
+In production the caller raises rather than returning these strings.
 """
 
 from __future__ import annotations

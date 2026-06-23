@@ -1,19 +1,23 @@
 """
-Node Middleware — Phase F: F-37, F-38
-======================================
-Provides a decorator pattern for adding cross-cutting concerns to any
-LangGraph node function without modifying the node's core logic.
+Node middleware — wraps any async LangGraph node with timeout, retry, and tracing.
 
-``with_node_middleware()`` wraps an async node function with:
-  - asyncio.wait_for timeout enforcement
-  - Exponential-backoff retry on configurable exception types
-  - OTEL span creation (langgraph.node.{node_name}) — optional
-  - NODE_LATENCY_MS Prometheus histogram recording — optional
+Applied at graph-build time so individual node functions stay focused on
+their domain logic.  The wrapper handles three concerns that are identical
+across every node:
 
-Usage at graph-build time:
+  Timeout: asyncio.wait_for terminates nodes that hang due to a slow
+  downstream service.  The default is 30s; retrieval nodes use 15s.
 
-    from app.graph.middleware.node_middleware import with_node_middleware
+  Retry: exponential backoff on transient errors.  ChromaDB occasionally
+  returns a gRPC UNAVAILABLE on cold start; two retries cover that window
+  without waiting longer than ~6s total.  The retry set is explicit so a
+  programming error (KeyError, AttributeError) is not silently swallowed.
 
+  OTEL: emits a span per node execution with node_name and session_id
+  attributes.  The Prometheus histogram gives per-node p95 latency visible
+  in Grafana without any additional instrumentation in the node itself.
+
+Usage:
     builder.add_node(
         "code_retrieve_node",
         with_node_middleware(
@@ -23,11 +27,6 @@ Usage at graph-build time:
             retry_on=(ChromaDBError,),
         )
     )
-
-Tested by:
-  F-011  with_node_middleware importable
-  F-012  Wrapped node return value is preserved
-  F-013  Flaky node succeeds after retry (max_retries=3, 2 failures before success)
 """
 
 from __future__ import annotations

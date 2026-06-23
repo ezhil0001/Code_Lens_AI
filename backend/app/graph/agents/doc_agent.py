@@ -1,13 +1,15 @@
 """
-DocAgent Sub-Graph — Phase B: F-06
-====================================
-Mirrors CodeAgent but targets KT documentation (file_type=kt_doc).
+DocAgent — handles queries about KT documentation: onboarding guides,
+architecture notes, process documentation, and decision records.
 
-Key differences from CodeAgent:
-  - DOC_AGENT_METADATA_FILTER = {"file_type": "kt_doc"}
-  - BM25 weight 0.6 / vector weight 0.4 (exact section lookup)
-  - LLM prompt uses documentation-focused few-shot template
-  - All node names prefixed doc_*
+Mirrors the CodeAgent pipeline but applies a file_type=kt_doc filter so
+retrieval stays inside the documentation collection.  BM25 is weighted
+higher (0.6) than vector (0.4) because documentation queries tend to match
+on exact section titles and product-specific terminology that dense embeddings
+can miss.  The LLM prompt uses a documentation-focused few-shot template
+from few_shot_prompt.py.
+
+Node names are prefixed `doc_` to avoid key collisions in the supervisor graph.
 """
 
 from __future__ import annotations

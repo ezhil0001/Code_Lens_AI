@@ -6,20 +6,20 @@ import { ChatComponent } from './features/chat/components/chat.component';
 export const routes: Routes = [
   {
     path: '',
-    redirectTo: '/login',  // ← Changed: Default route goes to login, not chat
+    redirectTo: '/login',
     pathMatch: 'full'
   },
   {
     path: 'login',
-    component: LoginComponent  // ✅ Login route - no guard
+    component: LoginComponent
   },
   {
     path: 'chat',
     component: ChatComponent,
-    canActivate: [authGuard]  // ✅ Protected route - requires authentication
+    canActivate: [authGuard]
   },
   {
     path: '**',
-    redirectTo: '/login'  // ✅ Redirect unknown routes to login
+    redirectTo: '/login'
   }
 ];

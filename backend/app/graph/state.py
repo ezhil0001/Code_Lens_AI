@@ -1,19 +1,15 @@
 """
-AgentState — Central LangGraph State Schema
-============================================
-Phase A: F-01
+AgentState — Central LangGraph state schema shared across all graph nodes.
 
-This TypedDict is the single source of truth that flows through every node
-in the LangGraph Supervisor graph.  Think of it as a Redux store:
-  - Nodes READ from it freely.
-  - Nodes RETURN only the fields they changed (dict, never the full state).
-  - operator.add on `messages` means nodes append — they never overwrite.
+Every node reads from this dict and returns only the fields it modified.
+The `messages` field uses operator.add as a reducer so parallel nodes can
+append without clobbering each other — standard LangGraph pattern.
 
-Design rules:
-  - Never mutate the state object directly — return a partial dict.
-  - `query` is set by the entry node and is immutable after that.
-  - `user_id` / `session_id` must always use the namespaced form
-    "{user_id}::{raw_session_id}" (security invariant from Phase 2).
+Invariant: session_id must always be the namespaced form
+"{user_id}::{raw_session_id}" by the time it reaches any node.  The v2
+chat endpoint builds this before constructing the initial state; nodes
+never re-namespace it.  Breaking this would silently mix conversation
+history across users.
 """
 
 from __future__ import annotations

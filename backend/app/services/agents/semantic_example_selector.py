@@ -1,8 +1,15 @@
-"""Phase 3: Semantic Similarity Example Selector.
+"""
+SemanticExampleSelector — picks the most relevant few-shot Q&A examples for
+the current query using embedding cosine similarity.
 
-Dynamically selects high-quality Q&A examples based on semantic similarity
-to the user's query. Uses the vector store to find contextually relevant
-examples for Few-Shot learning.
+The few-shot examples are curated pairs of (question, answer) that represent
+ideal responses for common query patterns.  Injecting the two or three most
+similar examples into the LLM prompt consistently improves response quality
+on code explanation and documentation queries — particularly for technical
+phrasing that the base model under-samples.
+
+Quality score (0–1 per example) lets curators down-weight examples that are
+technically correct but produce verbose or off-format answers.
 """
 
 import logging
