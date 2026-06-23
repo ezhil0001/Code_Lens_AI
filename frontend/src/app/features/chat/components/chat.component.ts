@@ -86,16 +86,18 @@ import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
           
           <!-- File Upload -->
           <div class="upload-section">
-            <label class="file-input-label">
-              <input type="file" 
-                     multiple 
-                     accept=".pdf,.txt,.md,.py,.ts,.js,.java,.cpp,.c,.h,.go,.rs" 
+            <label class="file-input-label" [class.drag-over]="isDragOver"
+                   (dragover)="onDragOver($event)" (dragleave)="onDragLeave()"
+                   (drop)="onDrop($event)">
+              <input type="file"
+                     multiple
+                     accept=".md,.txt,.pdf,.py,.ts,.js,.jsx,.tsx,.java,.cpp,.c,.h,.cc,.cxx,.go,.rs,.rb,.php,.cs,.swift,.kt,.scala,.r,.m,.sh,.bash,.yaml,.yml,.json,.toml,.xml,.html,.css,.scss,.sql"
                      (change)="onFilesSelected($event)"
                      [disabled]="isIngesting"
                      class="file-input">
-              <span class="file-input-text">Click to select files</span>
+              <span class="file-input-text">Click to select or drag &amp; drop files</span>
             </label>
-            <p class="file-types">Supported: PDF, TXT, MD, PY, TS, JS, JAVA, CPP, C, H, GO, RS</p>
+            <p class="file-types">Code: <strong>.py .ts .js .jsx .tsx .java .cpp .c .go .rs .rb .php .cs .swift .kt .sh</strong> &nbsp;|&nbsp; Docs: <strong>.pdf .txt .md .yaml .json .toml .xml .html .css .scss .sql</strong></p>
           </div>
 
           <!-- OR Divider -->
@@ -113,6 +115,14 @@ import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
                     class="ingest-btn">
               {{ isIngesting ? 'Ingesting...' : 'Ingest URL' }}
             </button>
+          </div>
+
+          <!-- Rejected-file warnings -->
+          <div *ngIf="rejectedFiles.length > 0" class="rejected-files">
+            <strong>⚠️ Rejected (not .md):</strong>
+            <ul>
+              <li *ngFor="let name of rejectedFiles">{{ name }}</li>
+            </ul>
           </div>
 
           <!-- Status Message -->
@@ -455,6 +465,36 @@ import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
       background: #4b5563;
       cursor: not-allowed;
       opacity: 0.6;
+    }
+
+    .file-input-label.drag-over {
+      background: rgba(102, 126, 234, 0.18);
+      border-color: #5568d3;
+    }
+
+    .rejected-files {
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: #451a03;
+      border: 1px solid #92400e;
+      color: #fde68a;
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+
+    .rejected-files strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .rejected-files ul {
+      margin: 0;
+      padding-left: 16px;
+    }
+
+    .rejected-files li {
+      margin: 2px 0;
+      font-family: 'Fira Code', monospace;
     }
 
     .ingestion-status {
@@ -935,8 +975,22 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   showUploadPanel = false;
   uploadUrl: string = '';
   isIngesting = false;
+  isDragOver = false;
   ingestionProgress = 0;
   ingestionStatus: string = '';
+  rejectedFiles: string[] = [];
+
+  /** All supported code and document file types for ingestion. */
+  private static readonly ALLOWED_EXT = new Set([
+    '.md', '.txt', '.pdf',
+    '.py', '.ts', '.js', '.jsx', '.tsx',
+    '.java', '.cpp', '.c', '.h', '.cc', '.cxx',
+    '.go', '.rs', '.rb', '.php', '.cs', '.swift',
+    '.kt', '.scala', '.r', '.m',
+    '.sh', '.bash',
+    '.yaml', '.yml', '.json', '.toml', '.xml',
+    '.html', '.css', '.scss', '.sql',
+  ]);
 
   exampleQueries = [
     'How do I initialize the database?',
@@ -1206,9 +1260,58 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   onFilesSelected(event: Event) {
     const input = event.target as HTMLInputElement;
     if (input.files && input.files.length > 0) {
-      const files = Array.from(input.files);
-      this.uploadFiles(files);
+      this._processFiles(Array.from(input.files));
+      // Reset so the same file can be re-selected after rejection
+      input.value = '';
     }
+  }
+
+  // ─── Drag-and-drop handlers ───────────────────────────────────────────────
+
+  onDragOver(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isDragOver = true;
+  }
+
+  onDragLeave(): void {
+    this.isDragOver = false;
+  }
+
+  onDrop(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isDragOver = false;
+    const files = event.dataTransfer ? Array.from(event.dataTransfer.files) : [];
+    if (files.length) this._processFiles(files);
+  }
+
+  // ─── Private: validate + split files before uploading ────────────────────
+
+  private _processFiles(files: File[]): void {
+    const allowed = ChatComponent.ALLOWED_EXT;
+    const valid: File[] = [];
+    const rejected: string[] = [];
+
+    for (const file of files) {
+      const ext = '.' + file.name.split('.').pop()!.toLowerCase();
+      if (allowed.has(ext)) {
+        valid.push(file);
+      } else {
+        rejected.push(`${file.name} (.${file.name.split('.').pop()} is not allowed)`);
+      }
+    }
+
+    this.rejectedFiles = rejected;
+    this.cdr.detectChanges();
+
+    if (valid.length === 0) {
+      this.ingestionStatus = '✗ No valid .md files selected.';
+      this.cdr.detectChanges();
+      return;
+    }
+
+    this.uploadFiles(valid);
   }
 
   /**
@@ -1218,20 +1321,31 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     if (files.length === 0) return;
 
     this.isIngesting = true;
-    this.ingestionStatus = `Uploading ${files.length} file(s)...`;
+    this.ingestionStatus = `Uploading ${files.length} .md file(s)…`;
+    this.cdr.detectChanges();
 
     this.ingestService.uploadDocuments(files).subscribe({
       next: (response) => {
-        this.ingestionStatus = `✓ Successfully ingested ${files.length} file(s)`;
+        const backendErrors: string[] = response?.errors ?? [];
+        if (backendErrors.length > 0) {
+          // Backend also rejected some files — surface them
+          this.rejectedFiles = [...this.rejectedFiles, ...backendErrors];
+        }
+        const accepted = response?.files_ingested ?? files.length;
+        this.ingestionStatus = `✓ Successfully ingested ${accepted} file(s)`;
         this.isIngesting = false;
+        this.cdr.detectChanges();
         setTimeout(() => {
           this.showUploadPanel = false;
           this.ingestionStatus = '';
-        }, 2000);
+          this.rejectedFiles = [];
+          this.cdr.detectChanges();
+        }, 3000);
       },
       error: (error) => {
         this.ingestionStatus = `✗ Upload failed: ${error.message}`;
         this.isIngesting = false;
+        this.cdr.detectChanges();
       }
     });
   }
@@ -1267,6 +1381,10 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
    */
   toggleUploadPanel() {
     this.showUploadPanel = !this.showUploadPanel;
+    if (!this.showUploadPanel) {
+      this.ingestionStatus = '';
+      this.rejectedFiles = [];
+    }
   }
 
   /**

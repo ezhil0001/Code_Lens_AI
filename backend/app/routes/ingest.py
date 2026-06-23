@@ -70,7 +70,8 @@ async def ingest_documents(files: List[UploadFile] = File(...)):
     3. Delegate to ContextAwareIngestionPipeline
     4. Pipeline orchestrates: Load → Split (language-aware) → PDR → Embed → Store
     
-    Supported formats: PDF, TXT, MD, PY, TS, JS, JAVA, CPP, C, H, GO, RS
+    Supported formats: MD, TXT, PDF, PY, TS, JS, JAVA, CPP, C, H, GO, RS,
+    HTML, CSS, JSON, YAML, TOML, SH
     
     Args:
         files: List of files to ingest
@@ -101,8 +102,9 @@ async def ingest_documents(files: List[UploadFile] = File(...)):
         logger.info(f"� Created temporary directory: {temp_dir}")
         
         allowed_extensions = {
-            '.pdf', '.txt', '.md', '.py', '.ts', '.js',
-            '.java', '.cpp', '.c', '.h', '.go', '.rs'
+            '.md', '.txt', '.pdf',
+            '.py', '.ts', '.js', '.java', '.cpp', '.c', '.h', '.go', '.rs',
+            '.html', '.css', '.json', '.yaml', '.yml', '.toml', '.sh',
         }
         
         saved_files = []
