@@ -20,7 +20,6 @@ Python client is not thread-safe.  Do not remove that lock.
 Node names are all prefixed `code_` to avoid key collisions when the supervisor
 adds multiple agents to the same StateGraph.
 """
-"""
 
 from __future__ import annotations
 
@@ -172,7 +171,7 @@ async def code_rerank_node(state: dict, config: RunnableConfig = None) -> dict:
 
 
 async def code_pdr_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Parent Document Retrieval — fetch full function bodies for top chunks."""
+    """Parent Document Retrieval - fetch full function bodies for top chunks."""
     reranked: List[Dict] = state.get("reranked_chunks", [])
     visited = list(state.get("nodes_visited", []))
     visited.append("code_pdr_node")

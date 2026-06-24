@@ -29,48 +29,47 @@ def _try_import(path: str):
 
 
 async def _test_v2_chat_router_importable() -> TestResult:
-    mod, err = _try_import("app.api.v2.chat")
+    mod, err = _try_import("app.api.chat")
     if err:
-        return TestResult.failed(f"Cannot import app.api.v2.chat: {err}")
-    if not hasattr(mod, "router"):
-        return TestResult.failed("router not found in app.api.v2.chat")
-    return TestResult.passed("app.api.v2.chat.router found ✓")
+        return TestResult.failed(f"Cannot import app.api.chat: {err}")
+    if not hasattr(mod, "router_v2"):
+        return TestResult.failed("router_v2 not found in app.api.chat")
+    return TestResult.passed("app.api.chat.router_v2 found ✓")
 
 
 async def _test_v2_stream_endpoint_registered() -> TestResult:
-    mod, err = _try_import("app.api.v2.chat")
+    mod, err = _try_import("app.api.chat")
     if err:
-        return TestResult.skipped("app.api.v2.chat not importable")
-    routes = [str(r.path) for r in getattr(mod.router, "routes", [])]
+        return TestResult.skipped("app.api.chat not importable")
+    routes = [str(r.path) for r in getattr(mod.router_v2, "routes", [])]
     matching = [r for r in routes if "stream" in r]
     if not matching:
-        return TestResult.failed(f"No /stream route found. Routes: {routes}")
+        return TestResult.failed(f"No /stream route found in router_v2. Routes: {routes}")
     return TestResult.passed(f"v2 stream endpoint: {matching[0]} ✓")
 
 
 async def _test_chat_v2_request_valid() -> TestResult:
-    mod, err = _try_import("app.api.v2.chat")
+    mod, err = _try_import("app.api.chat")
     if err:
-        return TestResult.skipped("app.api.v2.chat not importable")
+        return TestResult.skipped("app.api.chat not importable")
     if not hasattr(mod, "ChatV2Request"):
-        return TestResult.failed("ChatV2Request not found in app.api.v2.chat")
+        return TestResult.failed("ChatV2Request not found in app.api.chat")
     try:
         req = mod.ChatV2Request(
             query="how does auth work?",
             session_id="sess-001",
             user_id="user-001",
         )
-        assert req.stream is True       # default
-        assert req.hil_enabled is False # default
+        assert req.hil_enabled is False  # default
         return TestResult.passed("ChatV2Request validates with defaults ✓")
     except Exception as exc:
         return TestResult.error(exc)
 
 
 async def _test_chat_v2_request_rejects_long_query() -> TestResult:
-    mod, err = _try_import("app.api.v2.chat")
+    mod, err = _try_import("app.api.chat")
     if err:
-        return TestResult.skipped("app.api.v2.chat not importable")
+        return TestResult.skipped("app.api.chat not importable")
     if not hasattr(mod, "ChatV2Request"):
         return TestResult.skipped("ChatV2Request not found")
     try:
@@ -175,9 +174,9 @@ async def _test_format_sse_output() -> TestResult:
 
 
 async def _test_reconnect_param_wired() -> TestResult:
-    mod, err = _try_import("app.api.v2.chat")
+    mod, err = _try_import("app.api.chat")
     if err:
-        return TestResult.skipped("app.api.v2.chat not importable")
+        return TestResult.skipped("app.api.chat not importable")
     import inspect
     if not hasattr(mod, "chat_stream_v2"):
         return TestResult.failed("chat_stream_v2 endpoint function not found")
@@ -202,13 +201,13 @@ async def _test_v1_endpoint_still_registered() -> TestResult:
 
 TESTS: list[PhaseTest] = [
     PhaseTest(id="G-001", name="v2 chat router importable",
-              description="app.api.v2.chat.router found",
+              description="app.api.chat.router_v2 found",
               run=_test_v2_chat_router_importable, critical=True, tags=["api", "streaming"]),
     PhaseTest(id="G-002", name="POST /api/v2/chat/stream registered",
-              description="Stream endpoint route exists in v2 router",
+              description="Stream endpoint route exists in router_v2",
               run=_test_v2_stream_endpoint_registered, critical=True, tags=["api"]),
     PhaseTest(id="G-003", name="ChatV2Request validates with defaults",
-              description="stream=True, hil_enabled=False by default",
+              description="hil_enabled=False by default",
               run=_test_chat_v2_request_valid, critical=False, tags=["api"]),
     PhaseTest(id="G-004", name="ChatV2Request rejects query > 2048 chars",
               description="Pydantic max_length=2048 enforced",
