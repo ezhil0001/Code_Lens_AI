@@ -256,31 +256,30 @@ async def _test_all_agents_in_supervisor() -> TestResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# B-012  agent_brain.py compat shim still callable
+# B-012  agent_brain.py tombstone — file must NOT exist after commit B
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _test_agent_brain_compat_shim() -> TestResult:
-    mod, err = _try_import("app.services.agents.agent_brain")
-    if err:
-        return TestResult.failed(f"Cannot import agent_brain: {err}")
-    if not hasattr(mod, "AgentBrain"):
-        return TestResult.failed("AgentBrain class not found — compat shim broken")
-    # Check that the deprecated marker is present
-    brain_cls = mod.AgentBrain
-    has_deprecation = (
-        "deprecated" in getattr(brain_cls, "__doc__", "").lower()
-        or getattr(brain_cls, "_DEPRECATED", False)
-        or hasattr(brain_cls, "_compat_shim")
-    )
-    if not has_deprecation:
+async def _test_agent_brain_removed() -> TestResult:
+    """Tombstone: verifies that agent_brain.py has been deleted (commit B).
+
+    The v1 AgentBrain was a dead-code compat shim. Commit A (prep) removed
+    its only live call site in health.py and stripped the re-export from
+    agents/__init__.py.  Commit B deletes the file itself.
+
+    This test will FAIL until commit B is applied, which is intentional —
+    it keeps the deletion on the checklist until it is actually done.
+    """
+    mod, _err = _try_import("app.services.agents.agent_brain")
+    if mod is not None:
         return TestResult.failed(
-            "AgentBrain is not marked as deprecated",
+            "agent_brain.py still importable — commit B (file deletion) not applied yet",
             detail=(
-                "Add _DEPRECATED = True or update docstring with 'deprecated' "
-                "and ensure process_query delegates to supervisor graph"
-            )
+                "Delete backend/app/services/agents/agent_brain.py, "
+                "agentic_router.py, and mock_utils.py, then remove the legacy "
+                "AgenticRouter + AgentBrain block from pipeline_factory.py."
+            ),
         )
-    return TestResult.passed("AgentBrain compat shim present and marked deprecated ✓")
+    return TestResult.passed("agent_brain.py correctly absent (commit B applied) ✓")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -344,8 +343,8 @@ TESTS: list[PhaseTest] = [
         run=_test_all_agents_in_supervisor, critical=True, tags=["supervisor"],
     ),
     PhaseTest(
-        id="B-012", name="agent_brain.py compat shim callable",
-        description="AgentBrain still exists and is marked deprecated",
-        run=_test_agent_brain_compat_shim, critical=False, tags=["compat"],
+        id="B-012", name="agent_brain.py deleted (tombstone)",
+        description="agent_brain.py must be absent after commit B — fails until then",
+        run=_test_agent_brain_removed, critical=False, tags=["compat", "tombstone"],
     ),
 ]

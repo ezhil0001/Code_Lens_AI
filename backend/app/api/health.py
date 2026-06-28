@@ -88,38 +88,33 @@ class HealthChecker:
             }
     
     @staticmethod
-    async def check_agent_brain() -> Dict[str, Any]:
-        """Check Agent Brain initialization."""
-        try:
-            from app.services.agents.agent_brain import AgentBrain, AgentConfig
-            
-            config = AgentConfig()
-            brain = AgentBrain(config=config)
-            
-            return {
-                "name": "Agent Brain",
-                "status": "healthy",
-                "message": "All agent components available",
-            }
-        except Exception as e:
-            logger.warning(f"Agent Brain check failed: {e}")
-            return {
-                "name": "Agent Brain",
-                "status": "degraded",
-                "message": str(e),
-            }
-
-    @staticmethod
     async def check_retriever_engine() -> Dict[str, Any]:
-        """Check the hybrid retrieval engine (vector + BM25)."""
+        """Liveness check for the hybrid RetrieverEngine singleton.
+
+        Replaces the old ``check_agent_brain()`` which instantiated
+        ``AgentBrain`` — a v1 class scheduled for deletion.  This probe
+        checks the same runtime path that every query uses: the
+        ``RetrievalFactory`` singleton that owns the ``RetrieverEngine``.
+
+        No retrieval is executed; we only confirm the factory is initialised
+        and its engine is non-None, which takes <1 ms.
+        """
         try:
+            from app.services.scoped_factories import RetrievalFactory
+            t0 = time.time()
+            rf = RetrievalFactory.get_instance()
+            retriever = rf.get_retriever_engine()
+            if retriever is None:
+                raise RuntimeError("RetrieverEngine is None after factory init")
+            latency_ms = (time.time() - t0) * 1000
             return {
                 "name": "Retriever Engine",
                 "status": "healthy",
-                "message": "not_implemented_yet",
+                "message": "RetrieverEngine initialised",
+                "latency_ms": round(latency_ms, 2),
             }
         except Exception as e:
-            logger.warning(f"Retriever check failed: {e}")
+            logger.warning(f"Retriever Engine check failed: {e}")
             return {
                 "name": "Retriever Engine",
                 "status": "degraded",
@@ -153,31 +148,28 @@ async def detailed_health_check(background_tasks: BackgroundTasks) -> Dict[str, 
     - PostgreSQL
     - ChromaDB
     - LLM API
-    - Agent Brain
     - Retriever Engine
 
     Use this endpoint for monitoring dashboards and pre-deploy smoke tests.
     """
-    
+
     logger.info("Running detailed health check...")
-    
+
     checker = HealthChecker()
-    
+
     # Run all checks (parallel in production)
     pg_status = await checker.check_postgresql()
     chromadb_status = await checker.check_chromadb()
     llm_status = await checker.check_llm_api()
-    agent_status = await checker.check_agent_brain()
     retriever_status = await checker.check_retriever_engine()
-    
+
     components = {
         "database": pg_status,
         "vector_store": chromadb_status,
         "llm_api": llm_status,
-        "agent_brain": agent_status,
         "retriever_engine": retriever_status,
     }
-    
+
     # Determine overall status
     statuses = [c["status"] for c in components.values()]
     if all(s == "healthy" for s in statuses):
@@ -186,16 +178,16 @@ async def detailed_health_check(background_tasks: BackgroundTasks) -> Dict[str, 
         overall = "unhealthy"
     else:
         overall = "degraded"
-    
+
     response = {
         "overall_status": overall,
         "timestamp": datetime.now().isoformat(),
         "components": components,
         "environment": os.getenv("ENVIRONMENT", "development"),
     }
-    
+
     logger.info(f"Health check complete: {overall}")
-    
+
     return response
 
 
@@ -203,19 +195,18 @@ async def detailed_health_check(background_tasks: BackgroundTasks) -> Dict[str, 
 async def component_status() -> Dict[str, Any]:
     """
     Get status of each component (no timeouts).
-    
+
     Useful for dashboards and monitoring.
     """
-    
+
     checker = HealthChecker()
-    
+
     return {
         "timestamp": datetime.now().isoformat(),
         "components": {
             "database": await checker.check_postgresql(),
             "vector_store": await checker.check_chromadb(),
             "llm_api": await checker.check_llm_api(),
-            "agent_brain": await checker.check_agent_brain(),
             "retriever_engine": await checker.check_retriever_engine(),
         }
     }
@@ -236,8 +227,8 @@ async def system_info() -> Dict[str, Any]:
         "features": {
             "chat_streaming": True,
             "semantic_caching": True,
-            "agent_brain": True,
             "langgraph_supervisor": True,
+            "hybrid_retrieval": True,
         },
         "api": {
             "version": "0.1.0",
