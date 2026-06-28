@@ -1,15 +1,17 @@
 """
-Startup test base types — contract that every test module must implement.
+Startup test primitives — the contract every test suite module must follow.
 
-Each module under app/tests/ exports PHASE_ID, PHASE_NAME, and TESTS.
-The runner discovers and executes them automatically; no registration needed.
+Each sub-package under app/tests/ exports SUITE_NAME and TESTS.
+The runner discovers and executes them automatically at boot time.
 
-    from app.tests.base import PhaseTest, TestResult, TestStatus
+Quick example:
+
+    from app.tests.base import PhaseTest, TestResult
 
     async def _check_something() -> TestResult:
         try:
             assert something_works()
-            return TestResult.passed("description of what passed")
+            return TestResult.passed("short description of what passed")
         except AssertionError as e:
             return TestResult.failed(str(e))
 
@@ -19,7 +21,7 @@ The runner discovers and executes them automatically; no registration needed.
             name="Something works",
             description="One-line description of what is being checked",
             run=_check_something,
-            critical=True,   # marks the whole group FAILED if this test fails
+            critical=True,   # marks the whole suite FAILED if this test fails
             tags=["sanity"],
         )
     ]

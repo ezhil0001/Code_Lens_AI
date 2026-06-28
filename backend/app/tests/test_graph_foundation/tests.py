@@ -1,7 +1,7 @@
 """
-Phase A Test Cases — LangGraph Foundation
-==========================================
-Tests that validate the LangGraph foundation layer:
+Graph Foundation Tests
+======================
+Validates the LangGraph state machine layer that every request runs through.
 
   A-001  AgentState TypedDict importable and structurally correct
   A-002  messages field uses operator.add reducer (append semantics)
@@ -14,10 +14,8 @@ Tests that validate the LangGraph foundation layer:
   A-009  langgraph-checkpoint-postgres package present
   A-010  route_to_agent returns correct agent for each routing decision
 
-SUCCESS CRITERIA
-----------------
-All 10 tests must pass.  Tests A-001, A-004, and A-008 are critical:
-failure of any of these blocks the server from continuing to Phase B work.
+A-001, A-004, and A-008 are critical — if the graph can't compile,
+nothing else works.
 """
 
 from __future__ import annotations

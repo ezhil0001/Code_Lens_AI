@@ -1,16 +1,19 @@
 """
-CodeLens AI — LangGraph Multi-Agent Graph Package
-==================================================
-Phase A: LangGraph Foundation
+CodeLens AI — LangGraph orchestration layer.
 
-This package contains:
-  state.py             — AgentState TypedDict (the graph's shared state)
-  supervisor_graph.py  — Root StateGraph wiring all agents together
+The supervisor graph is the single entry point for every v2 chat request.
+It routes queries through the right agent, applies guardrails on both ends,
+loads conversation memory, and streams the final response back via SSE.
+
+Layout:
+  state.py             — AgentState TypedDict shared across all nodes
+  supervisor_graph.py  — Root StateGraph that wires everything together
   streaming.py         — SSEEvent, stream_graph_events, format_sse
-  nodes/               — Pure async node functions
-  agents/              — Compiled agent sub-graphs (Phase B)
-  memory/              — Short-term and long-term memory nodes (Phase C)
-  checkpointing/       — PostgresSaver configuration (Phase D)
-  guardrails/          — Input/output guardrail nodes (Phase F)
-  middleware/          — Node middleware hooks (Phase F)
+
+  nodes/               — Shared stateless nodes (classifier, synthesizer, HIL)
+  agents/              — One compiled sub-graph per agent type
+  memory/              — Short-term window loader + long-term pgvector store
+  checkpointing/       — PostgresSaver setup and thread-ID helpers
+  guardrails/          — Input and output guardrail nodes
+  middleware/          — Per-node retry and logging middleware hooks
 """

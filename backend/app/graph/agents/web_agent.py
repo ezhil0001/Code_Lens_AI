@@ -1,8 +1,10 @@
 """
-WebAgent Sub-Graph — Phase B: F-09
-=====================================
-External web search agent using Tavily for CVE lookups, library docs,
-and external references. Gracefully falls back if TAVILY_API_KEY absent.
+WebAgent — handles queries that need external information.
+
+Covers CVE lookups, changelog queries, package documentation, and anything
+else that requires a live web search rather than the local code corpus.
+Uses Tavily when TAVILY_API_KEY is set; falls back to a helpful error message
+that tells the user to configure the key rather than silently returning nothing.
 """
 
 from __future__ import annotations

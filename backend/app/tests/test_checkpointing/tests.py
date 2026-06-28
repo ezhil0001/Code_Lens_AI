@@ -1,6 +1,6 @@
 """
-Phase D Test Cases — Checkpointing & Time-Travel
-=================================================
+Checkpointing Tests
+===================
   D-001  pg_checkpointer module importable
   D-002  get_checkpointer() returns AsyncPostgresSaver (or MemorySaver fallback)
   D-003  Supervisor graph compiled with checkpointer stores checkpoint

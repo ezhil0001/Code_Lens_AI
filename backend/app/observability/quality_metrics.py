@@ -88,9 +88,10 @@ if _PROMETHEUS_AVAILABLE:
         labelnames=["model", "retriever_strategy"],
     )
 
-    # ── Phase F / H: LangGraph runtime metrics ────────────────────────────────
+    # ── LangGraph runtime metrics ─────────────────────────────────────────────
 
-    # Per-node latency histogram (Phase F middleware + Phase H observability)
+    # How long each node takes — useful for finding which node is the bottleneck
+    # on slow requests. Sliced by agent so you can compare CodeAgent vs DebugAgent.
     NODE_LATENCY_MS = Histogram(
         "langgraph_node_latency_ms",
         "Execution latency per LangGraph node in milliseconds.",
@@ -98,14 +99,16 @@ if _PROMETHEUS_AVAILABLE:
         buckets=[10, 50, 100, 250, 500, 1000, 2500, 5000],
     ) if _PROMETHEUS_AVAILABLE else None
 
-    # Guardrail check events counter (Phase F)
+    # Tracks how often the guardrails block, scrub, or pass a request.
+    # A sudden spike in "blocked" events is a sign of an active injection attempt.
     GUARDRAIL_EVENTS = Counter(
         "langgraph_guardrail_events_total",
         "Guardrail check events — passed, blocked, or scrubbed.",
         labelnames=["check_name", "action"],
     ) if _PROMETHEUS_AVAILABLE else None
 
-    # Per-agent token usage histogram (Phase H)
+    # Token usage per agent helps estimate LLM cost. token_type splits
+    # prompt tokens from completion tokens so we can see where the budget goes.
     AGENT_TOKENS = Histogram(
         "langgraph_agent_tokens_total",
         "LLM tokens consumed per agent per turn.",
@@ -113,21 +116,24 @@ if _PROMETHEUS_AVAILABLE:
         buckets=[100, 500, 1000, 2000, 4000, 8000],
     ) if _PROMETHEUS_AVAILABLE else None
 
-    # Graph edges traversed per turn (Phase H)
+    # Edge traversal depth is a cheap proxy for query complexity.
+    # Very high values (>13) usually mean the graph hit a retry loop.
     GRAPH_EDGES_TRAVERSED = Histogram(
         "langgraph_edges_per_turn",
         "Number of graph edges traversed per query.",
         buckets=[1, 2, 3, 5, 8, 13, 21],
     ) if _PROMETHEUS_AVAILABLE else None
 
-    # HIL interrupt counter (Phase E / H)
+    # HIL interrupts tell us how often the confidence threshold is being hit.
+    # Sustained high interrupt rates mean the classifier needs tuning.
     HIL_INTERRUPTS = Counter(
         "langgraph_hil_interrupts_total",
         "Total HIL interrupt events.",
         labelnames=["reason"],
     ) if _PROMETHEUS_AVAILABLE else None
 
-    # Long-term memory lookup counter (Phase C / H)
+    # LTM lookup counter — tracks how often we actually retrieve long-term facts.
+    # A flat zero here indicates the long-term memory retrieve path is not being invoked.
     LTM_LOOKUPS = Counter(
         "langgraph_ltm_lookups_total",
         "Long-term memory lookup events.",

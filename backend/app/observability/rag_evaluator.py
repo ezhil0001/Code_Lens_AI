@@ -1,6 +1,9 @@
-"""Phase 5: RAG Evaluation Framework using Ragas.
+"""RAG Evaluation Framework — measures answer quality using Ragas metrics.
 
-Evaluates RAG pipeline performance using open-source Ragas framework:
+Evaluates the RAG pipeline on four dimensions every time a response is
+generated. Results are stored in SQLite and exposed via Prometheus so
+quality regressions show up in Grafana before users notice them.
+
 1. **Faithfulness**: Does the answer use only the provided context?
 2. **Context Recall**: What percentage of ground truth is recalled?
 3. **Answer Relevancy**: How relevant is the answer to the query?
@@ -687,15 +690,15 @@ def example_evaluation():
         ),
         EvaluationSample(
             query="What is the retriever_engine.py file used for?",
-            ground_truth="It implements Phase 2 hybrid retrieval with vector search, "
-                        "BM25, query expansion, and reranking.",
+            ground_truth="It implements hybrid retrieval combining vector search, "
+                        "BM25, query expansion, and BGE reranking.",
             retrieved_context=[
-                "Phase 2: High-Performance Hybrid Retrieval Engine...",
+                "High-Performance Hybrid Retrieval Engine...",
                 "Combines vector-based and lexical retrieval...",
                 "Implements BGE-Reranker for top-K selection...",
             ],
-            answer="The retriever_engine.py implements the Phase 2 system that does "
-                   "hybrid retrieval combining vector search and BM25.",
+            answer="The retriever_engine.py implements a hybrid retrieval system that "
+                   "combines vector search and BM25 with BGE cross-encoder reranking.",
             session_id="session-001",
             source="code",
         ),

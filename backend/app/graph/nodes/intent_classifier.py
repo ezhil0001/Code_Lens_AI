@@ -55,6 +55,13 @@ _CODE_KEYWORDS = frozenset({
     "example of", "usage of", "call", "import",
 })
 
+_WEB_KEYWORDS = frozenset({
+    "cve", "vulnerability", "vulnerabilities", "latest version",
+    "changelog", "release notes", "npm package", "pypi", "external docs",
+    "official docs", "documentation site", "security advisory",
+    "patch notes", "upstream", "github issue",
+})
+
 
 # ── Intent string constants used in state.intent ─────────────────────────────
 
@@ -63,6 +70,7 @@ INTENT_DEBUG         = "DEBUG"
 INTENT_ARCHITECTURE  = "ARCHITECTURE"
 INTENT_KT_DOC        = "KT_DOC"
 INTENT_HYBRID        = "HYBRID"
+INTENT_WEB           = "WEB"
 
 
 # ── Routing decision → (agent_node_name, metadata_filter, intent) ─────────────
@@ -73,6 +81,7 @@ _ROUTING_TABLE: Dict[str, tuple[str, Optional[Dict[str, Any]], str]] = {
     "DEBUG":        ("DebugAgent", {"file_type": "code"},   INTENT_DEBUG),
     "ARCHITECTURE": ("ArchAgent",  None,                    INTENT_ARCHITECTURE),
     "HYBRID":       ("CodeAgent",  None,                    INTENT_HYBRID),
+    "WEB":          ("WebAgent",   None,                    INTENT_WEB),
 }
 
 
@@ -88,6 +97,12 @@ def _classify(query: str) -> tuple[str, float]:
     without importing the heavyweight AgenticRouter class.
     """
     q = query.lower()
+
+    # ── WEB: external CVEs, package lookups, changelogs ───────────────────────
+    web_hits = sum(1 for kw in _WEB_KEYWORDS if kw in q)
+    if web_hits >= 1:
+        confidence = min(0.65 + web_hits * 0.08, 0.95)
+        return "WEB", round(confidence, 2)
 
     # ── DEBUG: highest precedence — error signals are unambiguous ─────────────
     debug_hits = sum(1 for kw in _DEBUG_KEYWORDS if kw in q)

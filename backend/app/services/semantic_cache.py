@@ -90,8 +90,8 @@ class SemanticCache:
                 )
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS semantic_cache_embedding_idx "
-                    "ON semantic_cache USING ivfflat (embedding vector_cosine_ops) "
-                    "WITH (lists = 100);"
+                    "ON semantic_cache USING hnsw (embedding vector_cosine_ops) "
+                    "WITH (m = 16, ef_construction = 64);"
                 )
                 # Idempotent column backfill for upgrades from the un-scoped schema
                 cur.execute(

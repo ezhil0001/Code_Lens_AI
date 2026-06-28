@@ -281,7 +281,8 @@ class RAGPipelineFactory:
 
     def get_reranker(self):
         """Get the reranker component from the retriever (if available)."""
-        return getattr(self.retriever, 'reranker', None)
+        # The reranker is stored as `reranking_engine` on RetrieverEngine
+        return getattr(self.retriever, 'reranking_engine', None)
 
     def get_llm(self):
         """Get the configured LLM client."""

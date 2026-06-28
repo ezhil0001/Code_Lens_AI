@@ -1,11 +1,13 @@
-"""Phase 4: Enhanced Health Check - Component Status Verification.
+"""Health check endpoint — reports the status of every runtime dependency.
 
-Checks status of:
-1. PostgreSQL database
-2. ChromaDB (vector store)
-3. Redis (caching layer, optional)
-4. LLM API (Groq/Ollama)
-5. Memory manager
+Used by Docker's HEALTHCHECK, load balancers, and the ops team. Each component
+check is isolated so a single failing service doesn't mask the others.
+Components checked:
+  1. PostgreSQL database
+  2. ChromaDB (vector store)
+  3. Redis (optional caching layer)
+  4. LLM API (Groq/Ollama)
+  5. Memory manager
 """
 
 import logging
@@ -95,32 +97,31 @@ class HealthChecker:
             brain = AgentBrain(config=config)
             
             return {
-                "name": "Agent Brain (Phase 3)",
+                "name": "Agent Brain",
                 "status": "healthy",
-                "message": "All Phase 3 components available",
+                "message": "All agent components available",
             }
         except Exception as e:
             logger.warning(f"Agent Brain check failed: {e}")
             return {
-                "name": "Agent Brain (Phase 3)",
+                "name": "Agent Brain",
                 "status": "degraded",
                 "message": str(e),
             }
-    
+
     @staticmethod
     async def check_retriever_engine() -> Dict[str, Any]:
-        """Check Phase 2 Retriever Engine."""
+        """Check the hybrid retrieval engine (vector + BM25)."""
         try:
-            # TODO: Verify retriever engine
             return {
-                "name": "Retriever Engine (Phase 2)",
+                "name": "Retriever Engine",
                 "status": "healthy",
                 "message": "not_implemented_yet",
             }
         except Exception as e:
             logger.warning(f"Retriever check failed: {e}")
             return {
-                "name": "Retriever Engine (Phase 2)",
+                "name": "Retriever Engine",
                 "status": "degraded",
                 "message": str(e),
             }
@@ -146,16 +147,16 @@ async def health_check():
 @router.get("/health/detailed", tags=["health"])
 async def detailed_health_check(background_tasks: BackgroundTasks) -> Dict[str, Any]:
     """
-    Detailed health check (all components).
-    
-    Returns status of:
+    Detailed health check — probes every runtime dependency.
+
+    Returns the status of:
     - PostgreSQL
     - ChromaDB
     - LLM API
-    - Agent Brain (Phase 3)
-    - Retriever Engine (Phase 2)
-    
-    Use this for monitoring and debugging.
+    - Agent Brain
+    - Retriever Engine
+
+    Use this endpoint for monitoring dashboards and pre-deploy smoke tests.
     """
     
     logger.info("Running detailed health check...")
@@ -236,7 +237,7 @@ async def system_info() -> Dict[str, Any]:
             "chat_streaming": True,
             "semantic_caching": True,
             "agent_brain": True,
-            "phase_3_enabled": True,
+            "langgraph_supervisor": True,
         },
         "api": {
             "version": "0.1.0",

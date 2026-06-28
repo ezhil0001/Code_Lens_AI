@@ -48,10 +48,35 @@ async def arch_retrieve_node(state: dict, config: RunnableConfig = None) -> dict
     return {"retrieved_chunks": chunks, "nodes_visited": visited}
 
 
+async def arch_rerank_node(state: dict, config: RunnableConfig = None) -> dict:
+    """Rerank arch chunks using BGE cross-encoder, narrowing to top-5."""
+    query: str = state.get("query", "")
+    chunks: List[Dict] = state.get("retrieved_chunks", [])
+    visited = list(state.get("nodes_visited", []))
+    visited.append("arch_rerank_node")
+
+    reranked: List[Dict] = chunks[:5]
+    try:
+        from app.services.pipeline_factory import get_pipeline_factory_cached
+        factory = get_pipeline_factory_cached()
+        reranker = getattr(factory, "get_reranker", None)
+        if reranker and chunks:
+            # rerank() returns a (docs, scores) tuple — we only need the docs list
+            result = factory.get_reranker().rerank(query=query, documents=chunks, top_k=5)
+            reranked = result[0] if isinstance(result, tuple) else result
+        logger.info("[arch_rerank_node] reranked to %d chunks", len(reranked))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[arch_rerank_node] reranker unavailable: %s — using top-5", exc)
+        reranked = chunks[:5]
+
+    return {"reranked_chunks": reranked, "nodes_visited": visited}
+
+
 async def arch_generate_node(state: dict, config: RunnableConfig = None) -> dict:
     """LLM generation focused on architecture and data-flow synthesis."""
     query: str = state.get("query", "")
-    chunks: List[Dict] = state.get("retrieved_chunks", [])[:6]
+    # Prefer reranked_chunks from arch_rerank_node; fall back to raw retrieved_chunks if absent
+    chunks: List[Dict] = state.get("reranked_chunks", state.get("retrieved_chunks", []))[:6]
     visited = list(state.get("nodes_visited", []))
     visited.append("arch_generate_node")
 
@@ -79,9 +104,28 @@ async def arch_generate_node(state: dict, config: RunnableConfig = None) -> dict
         "both code structure and documentation. "
         "Describe data flows, component relationships, and design decisions clearly."
     )
+
+    # Build conversation history block from short-term memory window
+    history_block = ""
+    short_term_window: list = state.get("short_term_window", [])
+    if short_term_window:
+        history_lines = []
+        for turn in short_term_window:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role == "system":
+                history_lines.append(f"[Context] {content}")
+            elif role in ("human", "user"):
+                history_lines.append(f"User: {content}")
+            elif role in ("ai", "assistant"):
+                history_lines.append(f"Assistant: {content}")
+        if history_lines:
+            history_block = "\n\nConversation History:\n" + "\n".join(history_lines)
+
     user_prompt = (
         f"Architecture Question: {query}\n\n"
-        f"Context (code + docs):\n{context_text}\n\n"
+        f"Context (code + docs):\n{context_text}"
+        f"{history_block}\n\n"
         "Provide a comprehensive architectural explanation."
     )
 
@@ -120,10 +164,12 @@ def build_arch_agent() -> Any:
     builder = StateGraph(AgentState)
 
     builder.add_node("arch_retrieve_node", arch_retrieve_node)
+    builder.add_node("arch_rerank_node",   arch_rerank_node)
     builder.add_node("arch_generate_node", arch_generate_node)
 
     builder.set_entry_point("arch_retrieve_node")
-    builder.add_edge("arch_retrieve_node", "arch_generate_node")
+    builder.add_edge("arch_retrieve_node", "arch_rerank_node")
+    builder.add_edge("arch_rerank_node",   "arch_generate_node")
     builder.add_edge("arch_generate_node", END)
 
     return builder.compile()

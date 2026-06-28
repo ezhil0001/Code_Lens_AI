@@ -1,19 +1,21 @@
 """
-CodeLens AI — Phase Test Suite
-================================
-Auto-discovered by StartupTestRunner at server startup.
+CodeLens AI — Startup test suites.
 
-Every sub-package here maps 1-to-1 to a LangGraph modernisation phase:
-    phase_a  → LangGraph Foundation
-    phase_b  → Multi-Agent Supervisor System
-    phase_c  → Memory Architecture
-    phase_d  → Checkpointing & Time-Travel
-    phase_e  → Human-in-the-Loop
-    phase_f  → Middleware & Guardrails
-    phase_g  → Streaming & API Layer
-    phase_h  → Runtime Observability
+These run automatically at server boot via StartupTestRunner.run_all().
+Each sub-package covers a specific area of the system and exposes a TESTS
+list that the runner collects. Adding a new test is just adding a new
+PhaseTest entry — no registration needed anywhere else.
 
-Each module inside a phase package must expose:
-    PHASE_NAME  : str   — human-readable phase name
-    TESTS       : list[PhaseTest]  — test definitions (from base.py)
+    test_graph_foundation  → state schema, graph compilation, intent routing
+    test_agent_supervisor  → agent sub-graphs, supervisor node wiring
+    test_memory_layer      → STM window, LTM retrieval, entity extraction
+    test_checkpointing     → PostgresSaver, thread IDs, time-travel API routes
+    test_hil_workflow      → HIL trigger conditions, resume endpoint
+    test_guardrails        → injection detection, PII scrubbing, code safety scan
+    test_streaming_api     → SSE endpoints, schema validation, event format
+    test_observability     → Prometheus metrics, Grafana dashboard files
+
+Each module must export:
+    SUITE_NAME  : str              — shown in the startup report header
+    TESTS       : list[PhaseTest]  — test definitions (see base.py)
 """

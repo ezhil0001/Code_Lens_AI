@@ -1,19 +1,20 @@
 """
-LangGraph Runtime Instrumentation — Phase H: F-47 to F-51
-===========================================================
+LangGraph Runtime Instrumentation
+===================================
 Automatic OTEL span injection and Prometheus metric emission for every
 LangGraph node, without requiring individual nodes to import this module.
 
-Two complementary integration paths:
+Two integration paths are provided so callers can choose the right trade-off
+between explicitness and convenience:
 
 1. Decorator path — ``instrument_node(node_fn, node_name=...)``
    Wraps any async node function with timing, OTEL span, and Prometheus
-   metric recording.  Used at graph build time via the Phase F middleware.
+   metric recording. Use this when building the graph so every node emits
+   consistent telemetry without boilerplate in each node function.
 
 2. Callback path — ``LangGraphPrometheusCallback``
    A LangChain/LangGraph callback handler that listens to
-   ``on_chain_start`` / ``on_chain_end`` events and records
-   ``NODE_LATENCY_MS``, ``GRAPH_EDGES_TRAVERSED``, ``AGENT_TOKENS``,
+   ``on_chain_start`` / ``on_chain_end`` events and recordsNODE_LATENCY_MS``, ``GRAPH_EDGES_TRAVERSED``, ``AGENT_TOKENS``,
    ``HIL_INTERRUPTS``, and ``LTM_LOOKUPS`` automatically from the
    event stream — zero node modification required.
 

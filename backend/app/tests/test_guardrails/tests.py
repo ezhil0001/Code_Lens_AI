@@ -1,6 +1,6 @@
 """
-Phase F Test Cases — Middleware & Guardrails
-=============================================
+Guardrails Tests
+================
   F-001  input_guardrail module importable
   F-002  Prompt injection patterns block known injection strings
   F-003  Token budget check blocks queries > 512 tokens

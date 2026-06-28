@@ -1,6 +1,6 @@
 """
-Checkpoints & Time-Travel API — Phase D: F-21, F-22, F-23
-===========================================================
+Checkpoints & Time-Travel API
+==============================
 Exposes session checkpoint management and time-travel replay as a
 FastAPI router mounted under /api/v2/sessions.
 

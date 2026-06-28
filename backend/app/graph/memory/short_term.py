@@ -126,13 +126,16 @@ async def memory_read_node(state: dict, config: RunnableConfig = None) -> dict:
     Reads:
         state["user_id"]    — used for namespace isolation
         state["session_id"] — may be bare or already namespaced
+        state["query"]      — used for LTM semantic retrieval
 
     Writes:
         state["short_term_window"] — list of {role, content} dicts
+        state["long_term_facts"]   — list of relevant fact strings from LTM
         state["nodes_visited"]     — appended
     """
     user_id: str = state.get("user_id", "anonymous")
     raw_session_id: str = state.get("session_id", "")
+    query: str = state.get("query", "")
     visited = list(state.get("nodes_visited", []))
     visited.append("memory_read_node")
 
@@ -147,8 +150,16 @@ async def memory_read_node(state: dict, config: RunnableConfig = None) -> dict:
 
     logger.info("[STM] loaded %d turns for session %s", len(window), namespaced_id)
 
-    # Merge with any LTM facts already in state (injected by LongTermStore)
-    ltm_facts: List[str] = state.get("long_term_facts", [])
+    # Retrieve relevant facts from long-term memory using pgvector similarity
+    ltm_facts: List[str] = []
+    if user_id and user_id != "anonymous" and query:
+        try:
+            from app.graph.memory.long_term_store import get_ltm_store
+            ltm_facts = await get_ltm_store().retrieve(user_id=user_id, query=query, top_k=5)
+            logger.info("[LTM] retrieved %d facts for user=%s", len(ltm_facts), user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[LTM] retrieve failed in memory_read_node: %s", exc)
+
     if ltm_facts:
         # Prepend LTM context as a synthetic system turn so the LLM sees it
         ltm_turn = {
@@ -160,5 +171,6 @@ async def memory_read_node(state: dict, config: RunnableConfig = None) -> dict:
 
     return {
         "short_term_window": window,
+        "long_term_facts": ltm_facts,
         "nodes_visited": visited,
     }

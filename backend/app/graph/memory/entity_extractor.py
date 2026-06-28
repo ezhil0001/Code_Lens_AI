@@ -1,17 +1,15 @@
 """
-Entity Extractor — Phase C: F-14, F-15, F-16
-==============================================
-Extracts salient facts from a completed conversation turn for persistence
-into the long-term memory store.
-
-The extractor runs as a post-turn background task (memory_write_node).
-It uses a lightweight LLM call with a structured extraction prompt, or falls
-back to a heuristic keyword scanner if the LLM is unavailable.
+Entity Extractor — extracts salient facts from a completed conversation turn
+and queues them for long-term memory storage.
+=============================================================================
+Runs as a post-turn node (memory_write_node) after every response. Uses a
+lightweight LLM call with a structured extraction prompt. Falls back to
+heuristic keyword scanning when the LLM is unavailable or too slow.
 
 Entity types:
-  user_fact   — what the user is working on, their goals, team, project
-  code_fact   — specific modules, functions, bugs, architectural decisions
-  preference  — how the user likes answers formatted, verbosity, language
+  user_fact   — what the user is working on, their team, project, goals
+  code_fact   — specific modules, functions, bugs, or architectural decisions
+  preference  — how the user prefers answers: verbosity, language, format
 
 Tested by:
   C-008 — extract_facts() importable

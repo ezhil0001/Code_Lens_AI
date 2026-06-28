@@ -1,6 +1,6 @@
 """
-Phase H Test Cases — Runtime Observability
-===========================================
+Observability Tests
+===================
   H-001  langgraph_instrumentation module importable
   H-002  NODE_LATENCY_MS histogram declared
   H-003  AGENT_TOKENS histogram declared

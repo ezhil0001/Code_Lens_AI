@@ -23,6 +23,7 @@ when that latency becomes a bottleneck.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -34,7 +35,49 @@ from app.graph.nodes.intent_classifier import intent_classifier_node
 from app.graph.nodes.synthesizer import synthesizer_node as _real_synthesizer_node
 from app.graph.state import AgentState
 
-# ── Phase B: import real agent sub-graphs ────────────────────────────────────
+# ── Real implementations for guardrail / HIL / memory-write nodes ─────────────
+try:
+    from app.graph.guardrails.input_guardrail import input_guardrail_node as _real_input_guardrail
+    _INPUT_GUARDRAIL_AVAILABLE = True
+except Exception as _e:
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.warning("[SUPERVISOR] input_guardrail not available: %s", _e)
+    _INPUT_GUARDRAIL_AVAILABLE = False
+
+try:
+    from app.graph.nodes.hil_node import hil_check_node as _real_hil_check
+    _HIL_AVAILABLE = True
+except Exception as _e:
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.warning("[SUPERVISOR] hil_node not available: %s", _e)
+    _HIL_AVAILABLE = False
+
+try:
+    from app.graph.guardrails.output_guardrail import output_guardrail_node as _real_output_guardrail
+    _OUTPUT_GUARDRAIL_AVAILABLE = True
+except Exception as _e:
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.warning("[SUPERVISOR] output_guardrail not available: %s", _e)
+    _OUTPUT_GUARDRAIL_AVAILABLE = False
+
+try:
+    from app.graph.memory.entity_extractor import memory_write_node as _real_memory_write
+    _MEMORY_WRITE_AVAILABLE = True
+except Exception as _e:
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.warning("[SUPERVISOR] memory_write_node not available: %s", _e)
+    _MEMORY_WRITE_AVAILABLE = False
+
+try:
+    from app.graph.memory.short_term import memory_read_node as _real_memory_read
+    _MEMORY_READ_AVAILABLE = True
+except Exception as _e:
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.warning("[SUPERVISOR] short_term.memory_read_node not available: %s", _e)
+    _MEMORY_READ_AVAILABLE = False
+
+# ── Import real agent sub-graphs — failures are soft so the server still boots
+# even if an optional dependency (e.g. web-search library) is missing.
 try:
     from app.graph.agents.code_agent import build_code_agent as _build_code_agent
     from app.graph.agents.doc_agent import build_doc_agent as _build_doc_agent
@@ -51,39 +94,42 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lightweight pass-through nodes for pipeline stages that have not yet been
-# wired to a real implementation.  Each returns an empty dict so the graph
-# compiles and produces valid checkpoints — useful for testing routing logic
-# without requiring every service to be running.
+# Thin wrapper nodes — each one tries the real implementation first and falls
+# back to a no-op stub so the graph compiles and checkpoints correctly even
+# when an optional service (Postgres, external API) is unavailable at boot.
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _stub_node(name: str, state: dict, config: RunnableConfig) -> dict:
-    """Generic stub: logs, appends to nodes_visited, returns empty delta."""
-    logger.debug("[STUB] %s executed (not yet implemented)", name)
+    """No-op fallback used when the real node implementation couldn't be imported."""
+    logger.debug("[STUB] %s — real impl not available, returning empty delta", name)
     visited = list(state.get("nodes_visited", []))
     visited.append(f"{name}:stub")
     return {"nodes_visited": visited}
 
 
 async def input_guardrail_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase F stub — passes all inputs through."""
+    """Delegate to real input_guardrail_node or stub."""
+    if _INPUT_GUARDRAIL_AVAILABLE:
+        return await _real_input_guardrail(state, config)
     return await _stub_node("input_guardrail_node", state, config or {})
 
 
 async def cache_check_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase G stub — always reports cache miss."""
+    """Semantic cache lookup — always reports a miss until the cache service wires in."""
     visited = list(state.get("nodes_visited", []))
     visited.append("cache_check_node:stub")
     return {"cache_hit": False, "nodes_visited": visited}
 
 
 async def memory_read_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase C stub — returns empty memory fields."""
+    """Delegate to real memory_read_node (short_term.py) or stub."""
+    if _MEMORY_READ_AVAILABLE:
+        return await _real_memory_read(state, config)
     return await _stub_node("memory_read_node", state, config or {})
 
 
 async def code_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B — CodeAgent: delegates to compiled sub-graph."""
+    """Run the CodeAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
             graph = _build_code_agent()
@@ -102,7 +148,7 @@ async def code_agent_node(state: dict, config: RunnableConfig = None) -> dict:
 
 
 async def doc_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B — DocAgent: delegates to compiled sub-graph."""
+    """Run the DocAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
             graph = _build_doc_agent()
@@ -121,7 +167,7 @@ async def doc_agent_node(state: dict, config: RunnableConfig = None) -> dict:
 
 
 async def debug_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B — DebugAgent: delegates to compiled sub-graph."""
+    """Run the DebugAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
             graph = _build_debug_agent()
@@ -140,7 +186,7 @@ async def debug_agent_node(state: dict, config: RunnableConfig = None) -> dict:
 
 
 async def arch_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B — ArchAgent: delegates to compiled sub-graph."""
+    """Run the ArchAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
             graph = _build_arch_agent()
@@ -159,7 +205,7 @@ async def arch_agent_node(state: dict, config: RunnableConfig = None) -> dict:
 
 
 async def web_agent_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B — WebAgent: delegates to compiled sub-graph."""
+    """Run the WebAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
             graph = _build_web_agent()
@@ -178,27 +224,62 @@ async def web_agent_node(state: dict, config: RunnableConfig = None) -> dict:
 
 
 async def synthesizer_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase B — delegates to app.graph.nodes.synthesizer.synthesizer_node."""
+    """Merge multi-agent outputs into a single final_response; single-agent is a pass-through."""
     return await _real_synthesizer_node(state, config)
 
 
 async def hil_check_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase E stub — never interrupts."""
+    """Delegate to real hil_check_node or stub."""
+    if _HIL_AVAILABLE:
+        return await _real_hil_check(state, config)
     return await _stub_node("hil_check_node", state, config or {})
 
 
 async def output_guardrail_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase F stub — passes all outputs through."""
+    """Delegate to real output_guardrail_node or stub."""
+    if _OUTPUT_GUARDRAIL_AVAILABLE:
+        return await _real_output_guardrail(state, config)
     return await _stub_node("output_guardrail_node", state, config or {})
 
 
 async def response_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Phase G stub — logs the final response and marks evaluation queued."""
+    """Assemble final response and fire background RAGAS evaluation."""
     final = state.get("final_response", "[No response]")
     logger.info("[RESPONSE_NODE] final_response length=%d chars", len(final))
     visited = list(state.get("nodes_visited", []))
-    visited.append("response_node:stub")
+    visited.append("response_node")
+
+    # ── Fire-and-forget RAGAS evaluation ──────────────────────────────────────
+    try:
+        from app.observability.rag_evaluator import EvaluationSample, RAGEvaluator
+
+        retrieved_context = [
+            c.get("content", c.get("page_content", ""))
+            for c in state.get("reranked_chunks", [])
+            if isinstance(c, dict)
+        ]
+        sample = EvaluationSample(
+            query=state.get("query", ""),
+            ground_truth="",
+            retrieved_context=retrieved_context,
+            answer=final,
+            session_id=state.get("session_id", ""),
+            source=state.get("intent", "HYBRID"),
+        )
+        evaluator = RAGEvaluator.get_instance()
+        asyncio.create_task(evaluator.evaluate_sample(sample))
+        logger.debug("[RESPONSE_NODE] RAGAS evaluation task queued")
+    except Exception as _eval_err:  # noqa: BLE001
+        logger.debug("[RESPONSE_NODE] RAGAS eval skipped: %s", _eval_err)
+
     return {"evaluation_queued": True, "nodes_visited": visited}
+
+
+async def memory_write_node(state: dict, config: RunnableConfig = None) -> dict:
+    """Delegate to real memory_write_node (entity_extractor.py) or stub."""
+    if _MEMORY_WRITE_AVAILABLE:
+        return await _real_memory_write(state, config)
+    return await _stub_node("memory_write_node", state, config or {})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,7 +356,7 @@ def build_supervisor_graph(
     builder.add_node("memory_read_node",     memory_read_node)
     builder.add_node("intent_classifier_node", intent_classifier_node)
 
-    # Agent sub-graphs (stubs — replaced Phase B)
+    # Agent sub-graphs
     builder.add_node("CodeAgent",  code_agent_node)
     builder.add_node("DocAgent",   doc_agent_node)
     builder.add_node("DebugAgent", debug_agent_node)
@@ -287,6 +368,7 @@ def build_supervisor_graph(
     builder.add_node("hil_check_node",        hil_check_node)
     builder.add_node("output_guardrail_node", output_guardrail_node)
     builder.add_node("response_node",         response_node)
+    builder.add_node("memory_write_node",     memory_write_node)
 
     # ── Entry point ───────────────────────────────────────────────────────────
     builder.set_entry_point("input_guardrail_node")
@@ -333,7 +415,8 @@ def build_supervisor_graph(
     )
 
     builder.add_edge("output_guardrail_node", "response_node")
-    builder.add_edge("response_node", END)
+    builder.add_edge("response_node",         "memory_write_node")
+    builder.add_edge("memory_write_node",     END)
 
     # ── Compile ───────────────────────────────────────────────────────────────
     compile_kwargs: dict[str, Any] = {}

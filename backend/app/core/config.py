@@ -1,4 +1,4 @@
-"""Application Configuration Module - Enterprise Grade (CONSOLIDATED - Phase 5)
+"""Application configuration — centralised Pydantic settings for the whole app.
 
 Unified Pydantic settings management for ALL application configuration:
 ✅ Application settings

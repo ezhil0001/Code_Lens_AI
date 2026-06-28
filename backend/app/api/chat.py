@@ -129,15 +129,30 @@ class ChatV1Request(BaseModel):
 # Private helpers
 # ---------------------------------------------------------------------------
 
+# Compile the supervisor graph once per process, not per request — reuse across all handlers.
+_graph_singleton = None
+_graph_lock = None
+
+
 def _build_graph():
-    """Return the compiled supervisor graph, or None on failure."""
-    try:
-        from app.graph.checkpointing.pg_checkpointer import get_checkpointer_sync
-        from app.graph.supervisor_graph import build_supervisor_graph
-        return build_supervisor_graph(checkpointer=get_checkpointer_sync())
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[chat] supervisor graph unavailable: %s", exc)
-        return None
+    """Return the compiled supervisor graph singleton, or None on failure."""
+    global _graph_singleton, _graph_lock
+    import threading
+    if _graph_lock is None:
+        _graph_lock = threading.Lock()
+    if _graph_singleton is not None:
+        return _graph_singleton
+    with _graph_lock:
+        if _graph_singleton is not None:  # double-checked locking
+            return _graph_singleton
+        try:
+            from app.graph.checkpointing.pg_checkpointer import get_checkpointer_sync
+            from app.graph.supervisor_graph import build_supervisor_graph
+            _graph_singleton = build_supervisor_graph(checkpointer=get_checkpointer_sync())
+            logger.info("[chat] supervisor graph compiled and cached")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[chat] supervisor graph unavailable: %s", exc)
+    return _graph_singleton
 
 
 def _build_config(

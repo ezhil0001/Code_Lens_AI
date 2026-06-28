@@ -130,12 +130,69 @@ async def debug_pattern_node(state: dict, config: RunnableConfig = None) -> dict
 
 
 async def debug_dependency_node(state: dict, config: RunnableConfig = None) -> dict:
-    """Find callers / dependencies of the failing function."""
+    """Find callers / dependencies of the failing function using AST analysis."""
     query: str = state.get("query", "")
+    tool_calls: List[Dict] = state.get("tool_calls", [])
     visited = list(state.get("nodes_visited", []))
     visited.append("debug_dependency_node")
-    # Dependency traversal: Phase J enhancement — pass-through for now
-    return {"nodes_visited": visited}
+
+    # Extract the failing function name from parsed error context
+    target_func: Optional[str] = None
+    for tc in tool_calls:
+        if tc.get("node") == "debug_parse_error_node":
+            parsed = tc.get("parsed_error", {})
+            # Try to extract a function name from the error message
+            raw = parsed.get("raw_query", query)
+            m = re.search(r'(?:in|at|function)\s+["\']?(\w+)["\']?', raw, re.IGNORECASE)
+            if m:
+                target_func = m.group(1)
+            break
+
+    caller_chunks: List[Dict[str, Any]] = []
+    if target_func:
+        try:
+            from app.services.pipeline_factory import get_pipeline_factory_cached
+            import threading
+            factory = get_pipeline_factory_cached()
+            retriever = factory.get_retriever_engine()
+            _lock = getattr(retriever, "_metadata_lock", threading.Lock())
+            # Search for code that calls or imports the target function
+            caller_query = f"calls {target_func} OR imports {target_func} OR {target_func}("
+            with _lock:
+                result = retriever.retrieve(
+                    query=caller_query,
+                    top_k=5,
+                    metadata_filter={"file_type": "code"},
+                )
+            raw_callers = result.chunks if result else []
+            # Filter to chunks that actually reference the function name
+            for chunk in raw_callers:
+                content = chunk.get("content", chunk.get("page_content", ""))
+                if target_func in content:
+                    caller_chunks.append(chunk)
+            logger.info("[debug_dependency_node] found %d caller chunks for %s",
+                        len(caller_chunks), target_func)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[debug_dependency_node] caller search failed: %s", exc)
+
+    # Merge caller chunks into retrieved_chunks
+    existing = list(state.get("retrieved_chunks", []))
+    seen_ids = {c.get("id", c.get("chunk_id", "")) for c in existing}
+    for chunk in caller_chunks:
+        cid = chunk.get("id", chunk.get("chunk_id", ""))
+        if cid not in seen_ids:
+            existing.append(chunk)
+            seen_ids.add(cid)
+
+    dep_info = {"target_function": target_func, "caller_count": len(caller_chunks)}
+    tool_calls = list(tool_calls)
+    tool_calls.append({"node": "debug_dependency_node", "dependency_info": dep_info})
+
+    return {
+        "retrieved_chunks": existing[:12],
+        "tool_calls": tool_calls,
+        "nodes_visited": visited,
+    }
 
 
 async def debug_generate_node(state: dict, config: RunnableConfig = None) -> dict:
@@ -167,9 +224,28 @@ async def debug_generate_node(state: dict, config: RunnableConfig = None) -> dic
         "1) Root cause analysis, 2) Explanation, 3) Fix suggestion with code. "
         "Use ONLY the provided code context."
     )
+
+    # Build conversation history block from short-term memory window
+    history_block = ""
+    short_term_window: list = state.get("short_term_window", [])
+    if short_term_window:
+        history_lines = []
+        for turn in short_term_window:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role == "system":
+                history_lines.append(f"[Context] {content}")
+            elif role in ("human", "user"):
+                history_lines.append(f"User: {content}")
+            elif role in ("ai", "assistant"):
+                history_lines.append(f"Assistant: {content}")
+        if history_lines:
+            history_block = "\n\nConversation History:\n" + "\n".join(history_lines)
+
     user_prompt = (
         f"Issue: {query}\n\n"
-        f"Relevant Code:\n{context_text}\n\n"
+        f"Relevant Code:\n{context_text}"
+        f"{history_block}\n\n"
         "Provide root-cause analysis and a specific fix."
     )
 

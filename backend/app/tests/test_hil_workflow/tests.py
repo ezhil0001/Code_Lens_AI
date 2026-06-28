@@ -1,6 +1,6 @@
 """
-Phase E Test Cases — Human-in-the-Loop
-========================================
+HIL Workflow Tests
+==================
   E-001  hil_node module importable
   E-002  hil_check_node sets hil_required=True on low confidence
   E-003  hil_check_node sets hil_required=True on destructive keywords

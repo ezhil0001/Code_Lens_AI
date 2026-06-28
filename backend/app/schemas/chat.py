@@ -1,4 +1,4 @@
-"""Chat Request and Response Schemas - Phase 4 Production API"""
+"""Chat request and response schemas used by both the v1 and v2 streaming endpoints."""
 
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
@@ -6,10 +6,10 @@ from datetime import datetime
 import uuid
 
 
-# ==================== Phase 4: Stream-Ready Schemas ====================
+# ── Stream-ready schemas — all responses are designed for SSE streaming ──────
 
 class ChatRequest(BaseModel):
-    """Phase 4: Production chat request with session tracking."""
+    """Production chat request with session tracking and org scoping."""
     
     query: str = Field(..., description="User's question/query", min_length=1, max_length=5000)
     session_id: str = Field(
@@ -35,7 +35,7 @@ class ChatRequest(BaseModel):
 
 
 class ChatStreamResponse(BaseModel):
-    """Phase 4: Streaming response with metadata."""
+    """Streaming response chunk with sources and routing metadata."""
     
     content: str = Field(..., description="Generated response content")
     session_id: str = Field(..., description="Session identifier")

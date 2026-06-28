@@ -1,6 +1,10 @@
-"""Phase 5: OpenTelemetry Configuration & Setup.
+"""OpenTelemetry Configuration — distributed tracing and metrics setup.
 
-Provides centralized OpenTelemetry setup for distributed tracing across:
+Provides centralised OpenTelemetry initialisation for the full request
+pipeline. Traces flow from the FastAPI endpoint through the LangGraph
+nodes and down into ChromaDB and Postgres so latency hotspots are visible
+in Jaeger without adding per-function instrumentation everywhere.
+
 - Agent Brain orchestration
 - Retriever Engine (vector search, BM25, reranking)
 - LLM API calls

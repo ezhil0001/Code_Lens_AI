@@ -1,20 +1,21 @@
 """
-Startup test runner — validates critical application components at boot time.
+Startup test runner — runs sanity checks on critical components every time
+the server boots, before the first real request is served.
 
-Discovers all test packages under app/tests/, runs them sequentially, and
-writes a structured pass/fail report to the application logger.  Failures
-are visible in the terminal immediately after startup so broken deployments
-are caught before the first real request is served.
+Tests are discovered automatically from sub-packages under app/tests/ that
+start with "test_". Each package exposes a TESTS list that the runner
+collects and executes in alphabetical order.
 
-Called from app/main.py inside the lifespan context manager after the RAG
-pipeline is pre-warmed:
+Usage (called from main.py lifespan hook):
 
     from app.tests.runner import StartupTestRunner
     await StartupTestRunner.run_all()
 
-Environment:
-    STARTUP_TESTS_ENABLED   (default "true")  — set "false" to skip in prod.
-    STARTUP_TESTS_FAIL_FAST (default "false") — abort on first critical failure.
+Environment variables:
+    STARTUP_TESTS_ENABLED   — default "true". Set "false" to skip in production
+                               if startup time is critical and tests ran in CI.
+    STARTUP_TESTS_FAIL_FAST — default "false". Set "true" to abort on the first
+                               critical failure instead of running all suites.
 """
 
 from __future__ import annotations
@@ -55,30 +56,35 @@ _STATUS_LABEL = {
 }
 
 
-# ── Phase package discovery ──────────────────────────────────────────────────
+# ── Test suite discovery ──────────────────────────────────────────────────────
 
-def _discover_phase_packages() -> List[str]:
-    """Return sorted list of phase sub-package module paths.
+def _discover_test_suites() -> List[str]:
+    """Return sorted module paths for every test_* sub-package under app/tests/.
 
-    Looks for packages named  app.tests.phase_*  in alphabetical order so
-    phases always execute in declaration order (phase_a → phase_b → …).
+    Running them alphabetically gives a consistent ordering that matches
+    the directory names (test_agent_supervisor, test_checkpointing, …).
     """
     import app.tests as _tests_pkg
     pkg_path = _tests_pkg.__path__
     modules = []
     for _, mod_name, is_pkg in pkgutil.iter_modules(pkg_path):
-        if mod_name.startswith("phase_") and is_pkg:
+        if mod_name.startswith("test_") and is_pkg:
             modules.append(f"app.tests.{mod_name}")
     return sorted(modules)
 
 
-def _load_tests_from_package(pkg_path: str) -> tuple[str, str, List[PhaseTest]]:
-    """Import a phase package and return (phase_id, phase_name, tests)."""
+def _load_suite(pkg_path: str) -> tuple[str, str, List[PhaseTest]]:
+    """Import a test suite package and return (suite_id, suite_name, tests).
+
+    Falls back to the package name if the module doesn't declare SUITE_ID/NAME,
+    so old PHASE_ID/PHASE_NAME keys still work during migration.
+    """
     mod = importlib.import_module(pkg_path)
-    phase_id   = getattr(mod, "PHASE_ID",   pkg_path.split(".")[-1])
-    phase_name = getattr(mod, "PHASE_NAME", pkg_path)
+    short_name = pkg_path.split(".")[-1]
+    suite_id   = getattr(mod, "SUITE_ID",   getattr(mod, "PHASE_ID",   short_name))
+    suite_name = getattr(mod, "SUITE_NAME", getattr(mod, "PHASE_NAME", pkg_path))
     tests      = getattr(mod, "TESTS",      [])
-    return phase_id, phase_name, tests
+    return suite_id, suite_name, tests
 
 
 # ── Report rendering ─────────────────────────────────────────────────────────
@@ -91,23 +97,23 @@ def _render_report(reports: List[PhaseReport], total_ms: float) -> None:
     log = flow_logger.bind(tag="[STARTUP_TESTS]")
 
     log.info(f"\n{_BOLD}{_CYAN}{_SEP2}{_RESET}")
-    log.info(f"{_BOLD}{_CYAN}  CodeLens AI — Startup Phase Test Report{_RESET}")
+    log.info(f"{_BOLD}{_CYAN}  CodeLens AI — Startup Test Report{_RESET}")
     log.info(f"{_BOLD}{_CYAN}{_SEP2}{_RESET}\n")
 
     all_passed = True
 
     for report in reports:
-        phase_status = (
-            f"{_GREEN}{_BOLD}PHASE PASSED{_RESET}"
+        suite_status = (
+            f"{_GREEN}{_BOLD}PASSED{_RESET}"
             if report.phase_passed
-            else f"{_RED}{_BOLD}PHASE FAILED{_RESET}"
+            else f"{_RED}{_BOLD}FAILED{_RESET}"
         )
         if not report.phase_passed:
             all_passed = False
 
         log.info(
-            f"{_BOLD}Phase {report.phase_id}  —  {report.phase_name}{_RESET}  "
-            f"[{phase_status}]  "
+            f"{_BOLD}[{report.phase_id}] {report.phase_name}{_RESET}  "
+            f"[{suite_status}]  "
             f"{_DIM}{report.passed}/{report.total} passed  "
             f"{report.total_duration_ms}ms{_RESET}"
         )
@@ -141,13 +147,13 @@ def _render_report(reports: List[PhaseReport], total_ms: float) -> None:
     log.info(f"{_BOLD}{_CYAN}{_SEP2}{_RESET}")
     if all_passed:
         log.info(
-            f"{_GREEN}{_BOLD}  ✅  ALL PHASES PASSED — "
+            f"{_GREEN}{_BOLD}  ✅  ALL SUITES PASSED — "
             f"{total_passed}/{total_tests} tests  "
             f"({round(total_ms, 1)}ms total){_RESET}"
         )
     else:
         log.info(
-            f"{_RED}{_BOLD}  ❌  SOME PHASES FAILED — "
+            f"{_RED}{_BOLD}  ❌  SOME SUITES FAILED — "
             f"{total_passed} passed  {total_failed} failed  "
             f"{total_skipped} skipped  "
             f"({round(total_ms, 1)}ms total){_RESET}"
@@ -188,13 +194,13 @@ class StartupTestRunner:
         )
 
         flow_logger.bind(tag="[STARTUP_TESTS]").info(
-            "🧪  Discovering and running phase tests…"
+            "🧪  Discovering and running startup tests…"
         )
 
-        packages = _discover_phase_packages()
+        packages = _discover_test_suites()
         if not packages:
             flow_logger.bind(tag="[STARTUP_TESTS]").warning(
-                "⚠  No phase test packages found under app/tests/phase_*"
+                "⚠  No test suites found under app/tests/test_*"
             )
             return True
 
@@ -203,16 +209,16 @@ class StartupTestRunner:
 
         for pkg_path in packages:
             try:
-                phase_id, phase_name, tests = _load_tests_from_package(pkg_path)
+                phase_id, phase_name, tests = _load_suite(pkg_path)
             except Exception as exc:
                 flow_logger.bind(tag="[STARTUP_TESTS]").error(
-                    f"  ⚡  Failed to load package {pkg_path}: {exc}"
+                    f"  ⚡  Failed to load suite {pkg_path}: {exc}"
                 )
                 continue
 
             if not tests:
                 flow_logger.bind(tag="[STARTUP_TESTS]").warning(
-                    f"  ─  Phase {phase_id} ({phase_name}): no tests defined"
+                    f"  ─  [{phase_id}] {phase_name}: no tests defined"
                 )
                 continue
 

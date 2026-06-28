@@ -1,7 +1,7 @@
 """
-Phase B Test Cases — Multi-Agent Supervisor System
-====================================================
-Tests that validate all agent sub-graphs and the Supervisor wiring.
+Agent Supervisor Tests
+======================
+Validates all agent sub-graphs and the supervisor node wiring.
 
   B-001  CodeAgent sub-graph module importable
   B-002  CodeAgent sub-graph compiles
@@ -16,10 +16,7 @@ Tests that validate all agent sub-graphs and the Supervisor wiring.
   B-011  All agents registered as nodes in Supervisor graph
   B-012  agent_brain.py compat shim still callable (backward compat)
 
-SUCCESS CRITERIA
-----------------
-B-001, B-002, and B-011 are critical.  All 12 tests must pass to declare
-Phase B complete.
+B-001, B-002, and B-011 are critical.
 """
 
 from __future__ import annotations

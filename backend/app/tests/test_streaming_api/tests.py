@@ -1,6 +1,6 @@
 """
-Phase G Test Cases — Streaming & API Layer
-===========================================
+Streaming API Tests
+===================
   G-001  v2 chat router importable
   G-002  POST /api/v2/chat/stream endpoint registered
   G-003  ChatV2Request schema validates correctly

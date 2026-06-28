@@ -45,12 +45,12 @@ from app.middleware.exception_handler import (
     TokenRevocationExceptionHandler
 )
 
-# Phase 4: Import chat API
+# Import chat API — v1 compat + v2 LangGraph streaming endpoints
 try:
     from app.api import chat as chat_api
 except ImportError:
     logger = logging.getLogger(__name__)
-    logger.warning("Chat API not available (Phase 4)")
+    logger.warning("Chat API not available — check app/api/chat.py for import errors")
     chat_api = None
 
 
@@ -141,10 +141,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️  RAG pipeline pre-warm failed (will init on first request): {e}\n")
 
-    # ── Phase Startup Tests ───────────────────────────────────────────────
-    # Runs all phase_* test suites and logs structured pass/fail report.
+    # ── Startup sanity checks ─────────────────────────────────────────────
+    # Runs all test_* suites under app/tests/ and logs a structured report.
     # Controlled by STARTUP_TESTS_ENABLED env var (default: true).
-    # Failures are logged but never crash the server.
+    # Failures are logged but never crash the server — a broken optional
+    # component shouldn't take the whole service down on startup.
     try:
         from app.tests.runner import StartupTestRunner
         await StartupTestRunner.run_all()

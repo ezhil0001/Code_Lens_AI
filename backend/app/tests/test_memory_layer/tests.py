@@ -1,6 +1,6 @@
 """
-Phase C Test Cases — Memory Architecture
-==========================================
+Memory Layer Tests
+==================
   C-001  short_term module importable
   C-002  memory_read_node returns short_term_window key
   C-003  STM session_id is namespaced (user_id::session_id)

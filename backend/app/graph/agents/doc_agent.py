@@ -75,7 +75,9 @@ async def doc_rerank_node(state: dict, config: RunnableConfig = None) -> dict:
         factory = get_pipeline_factory_cached()
         reranker = getattr(factory, "get_reranker", None)
         if reranker and chunks:
-            reranked = factory.get_reranker().rerank(query=query, documents=chunks, top_k=5)
+            # rerank() returns a (docs, scores) tuple — we only need the docs list
+            result = factory.get_reranker().rerank(query=query, documents=chunks, top_k=5)
+            reranked = result[0] if isinstance(result, tuple) else result
     except Exception as exc:  # noqa: BLE001
         logger.debug("[doc_rerank_node] reranker unavailable: %s", exc)
 
@@ -113,9 +115,28 @@ async def doc_generate_node(state: dict, config: RunnableConfig = None) -> dict:
         "Answer the question using ONLY the provided KT documentation. "
         "Be clear and thorough, referencing specific sections."
     )
+
+    # Build conversation history block from short-term memory window
+    history_block = ""
+    short_term_window: list = state.get("short_term_window", [])
+    if short_term_window:
+        history_lines = []
+        for turn in short_term_window:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role == "system":
+                history_lines.append(f"[Context] {content}")
+            elif role in ("human", "user"):
+                history_lines.append(f"User: {content}")
+            elif role in ("ai", "assistant"):
+                history_lines.append(f"Assistant: {content}")
+        if history_lines:
+            history_block = "\n\nConversation History:\n" + "\n".join(history_lines)
+
     user_prompt = (
         f"Question: {query}\n\n"
-        f"Documentation Context:\n{context_text}\n\n"
+        f"Documentation Context:\n{context_text}"
+        f"{history_block}\n\n"
         "Provide a comprehensive explanation based on the documentation."
     )
 

@@ -204,7 +204,7 @@ async def ingest_documents(files: List[UploadFile] = File(...)):
                 "collection_id": result.get("collection_id"),
                 "processing_time_seconds": result.get("processing_time_seconds", 0),
             },
-            "message": f"Successfully ingested {len(saved_files)}/{len(files)} files through Phase 1 pipeline"
+            "message": f"Successfully ingested {len(saved_files)}/{len(files)} files"
         }
         
     except HTTPException:
@@ -302,7 +302,7 @@ async def ingest_url(url_data: dict):
                 "collection_id": result.get("collection_id"),
                 "processing_time_seconds": result.get("processing_time_seconds", 0),
             },
-            "message": f"Successfully ingested URL through Phase 1 pipeline"
+            "message": "Successfully ingested URL"
         }
         
     except HTTPException:
