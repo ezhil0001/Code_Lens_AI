@@ -119,7 +119,14 @@ async def code_expand_query_node(state: dict, config: RunnableConfig = None) -> 
 
 
 async def code_retrieve_node(state: dict, config: RunnableConfig = None) -> dict:
-    """BM25 + ChromaDB retrieval with file_type=code metadata filter."""
+    """BM25 + ChromaDB retrieval with file_type=code metadata filter.
+
+    Uses the code-specialized embedding model (``get_code_embedder()``) for
+    the vector leg so that query embeddings are computed in the same vector
+    space as the code-chunk embeddings produced during ingestion.  The BM25
+    leg is model-agnostic and is unaffected by this change.  Doc retrieval,
+    semantic cache, and LTM all keep the general-purpose embedder.
+    """
     import threading
 
     query: str = state.get("query", "")
@@ -132,15 +139,43 @@ async def code_retrieve_node(state: dict, config: RunnableConfig = None) -> dict
         from app.services.pipeline_factory import get_pipeline_factory_cached
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
-        _lock = getattr(retriever, "_metadata_lock", threading.Lock())
+
+        # Swap the vector-leg embedder to the code-specialized singleton for this call.
+        # We do it inside _filter_lock so no concurrent request sees the half-swapped state.
+        hybrid = retriever.hybrid_retriever
+        _lock = hybrid._filter_lock
+
+        try:
+            from app.core.database import get_code_embedder
+            _code_emb = get_code_embedder()
+        except Exception as _ce:
+            logger.warning("[code_retrieve_node] code embedder unavailable (%s) — using general", _ce)
+            _code_emb = None
+
         with _lock:
-            result = retriever.retrieve(
-                query=query,
-                top_k=10,
-                metadata_filter=metadata_filter,
-            )
+            _prev_emb = hybrid.vector_retriever.embeddings if _code_emb else None
+            if _code_emb:
+                try:
+                    hybrid.vector_retriever.embeddings = _code_emb
+                except Exception:
+                    _code_emb = None  # retriever is immutable — skip swap
+
+            try:
+                result = retriever.retrieve(
+                    query=query,
+                    top_k=10,
+                    metadata_filter=metadata_filter,
+                )
+            finally:
+                # Always restore the original embedder before releasing the lock
+                if _code_emb and _prev_emb is not None:
+                    try:
+                        hybrid.vector_retriever.embeddings = _prev_emb
+                    except Exception:
+                        pass
+
         chunks = result.chunks if result else []
-        logger.info("[code_retrieve_node] retrieved %d chunks", len(chunks))
+        logger.info("[code_retrieve_node] retrieved %d chunks (code embedder)", len(chunks))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[code_retrieve_node] retrieval failed: %s", exc)
 

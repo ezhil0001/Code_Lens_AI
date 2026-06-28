@@ -13,6 +13,7 @@ class EmbeddingEngine:
     def __init__(
         self,
         model_name: str = "sentence-transformers/all-mpnet-base-v2",
+        embedder=None,
     ):
         """Initialize embedding engine.
 
@@ -20,6 +21,10 @@ class EmbeddingEngine:
             model_name: HuggingFace model name for embeddings (used only as a
                 fallback identifier — the actual model comes from the shared
                 singleton in `app.core.database`).
+            embedder: Optional pre-constructed embedder instance to use
+                directly.  When supplied (e.g. ``get_code_embedder()``),
+                ``model_name`` is recorded for logging only and no singleton
+                look-up is performed.
 
         G2 FIX — Use the process-wide singleton `get_embedder()` instead of
         loading a second 500 MB model copy. During co-resident ingestion +
@@ -29,26 +34,35 @@ class EmbeddingEngine:
         """
         try:
             self.model_name = model_name
-            try:
-                from app.core.database import get_embedder
-                self.embeddings = get_embedder()
+
+            if embedder is not None:
+                # Caller injected a ready-made embedder (e.g. code-specialized singleton)
+                self.embeddings = embedder
                 logger.info(
-                    f"✅ Ingestion using SHARED singleton embedder "
+                    f"✅ Ingestion using INJECTED embedder "
                     f"(model={model_name})"
                 )
-            except Exception as singleton_err:
-                # Fallback for isolated tests / scripts that import this
-                # module without the full app context.
-                logger.warning(
-                    f"Singleton embedder unavailable ({singleton_err}); "
-                    f"falling back to local instance."
-                )
-                from langchain_community.embeddings import HuggingFaceEmbeddings
-                self.embeddings = HuggingFaceEmbeddings(
-                    model_name=model_name,
-                    encode_kwargs={"normalize_embeddings": True},
-                )
-                logger.info(f"Initialized local embeddings: {model_name}")
+            else:
+                try:
+                    from app.core.database import get_embedder
+                    self.embeddings = get_embedder()
+                    logger.info(
+                        f"✅ Ingestion using SHARED singleton embedder "
+                        f"(model={model_name})"
+                    )
+                except Exception as singleton_err:
+                    # Fallback for isolated tests / scripts that import this
+                    # module without the full app context.
+                    logger.warning(
+                        f"Singleton embedder unavailable ({singleton_err}); "
+                        f"falling back to local instance."
+                    )
+                    from langchain_community.embeddings import HuggingFaceEmbeddings
+                    self.embeddings = HuggingFaceEmbeddings(
+                        model_name=model_name,
+                        encode_kwargs={"normalize_embeddings": True},
+                    )
+                    logger.info(f"Initialized local embeddings: {model_name}")
 
         except Exception as e:
             logger.error(f"Error initializing embeddings: {str(e)}")

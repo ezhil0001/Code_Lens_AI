@@ -190,3 +190,66 @@ def get_embed_dim() -> int:
 
 def get_embed_model_name() -> str:
     return _DEFAULT_EMBED_MODEL
+
+
+# --------------------------------------------------------------------------- #
+# Code-specialized embedding model singleton                                  #
+# --------------------------------------------------------------------------- #
+_code_embedder_lock = threading.Lock()
+_code_embedder = None  # type: ignore
+
+# Default: a 768-dim model fine-tuned on code search.
+# Must be the same dimension as the general embedder (768) so existing
+# ChromaDB collections and pgvector tables are compatible.
+# Override via env var: CODE_EMBED_MODEL
+_DEFAULT_CODE_EMBED_MODEL = os.getenv(
+    "CODE_EMBED_MODEL",
+    "flax-sentence-embeddings/st-codesearch-distilroberta-base",
+)
+_CODE_EMBED_DIM = int(os.getenv("CODE_EMBED_DIM", "768"))
+
+
+def get_code_embedder():
+    """Return the process-wide code-specialized ``HuggingFaceEmbeddings`` singleton.
+
+    Uses ``flax-sentence-embeddings/st-codesearch-distilroberta-base`` by
+    default — a 768-dim model trained on CodeSearchNet that significantly
+    out-ranks general-purpose text models on code lookup tasks.
+
+    Override via ``CODE_EMBED_MODEL`` env var (must emit 768-dim vectors to
+    stay compatible with existing ChromaDB collections; adjust ``CODE_EMBED_DIM``
+    if you switch to a different-dim model and create a separate collection).
+
+    Only ``code_retrieve_node`` and the code-chunk embedding step in the
+    ingestion pipeline use this embedder.  Doc retrieval, semantic cache,
+    and long-term memory all keep ``get_embedder()``.
+    """
+    global _code_embedder
+    if _code_embedder is not None:
+        return _code_embedder
+
+    with _code_embedder_lock:
+        if _code_embedder is not None:
+            return _code_embedder
+
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "langchain_huggingface is required. Install with "
+                "`pip install langchain-huggingface`."
+            ) from e
+
+        _code_embedder = HuggingFaceEmbeddings(model_name=_DEFAULT_CODE_EMBED_MODEL)
+        logger.info(f"✅ Code-specialized embedder loaded: {_DEFAULT_CODE_EMBED_MODEL}")
+        return _code_embedder
+
+
+def get_code_embed_dim() -> int:
+    """Return the vector dimension of the code-specialized embedder."""
+    return _CODE_EMBED_DIM
+
+
+def get_code_embed_model_name() -> str:
+    """Return the model name used by the code-specialized embedder."""
+    return _DEFAULT_CODE_EMBED_MODEL

@@ -413,10 +413,41 @@ class ContextAwareIngestionPipeline:
             logger.info(f"[PHASE-3] ✓ Created PDR structure: {num_parents} parents, {num_children} children")
             
             # Stage 4: Generate embeddings
+            # Code chunks use the code-specialized embedder; prose chunks use
+            # the shared general-purpose embedder.  Both are 768-dim singletons
+            # so they land in the same ChromaDB collection without schema changes.
             logger.info("[PHASE-4] Generating embeddings...")
             log_step("[EMBEDDING]", f"model={self.embedding_model} chunks={len(enhanced_chunks)}")
-            embedding_engine = EmbeddingEngine(model_name=self.embedding_model)
-            
+
+            try:
+                from app.core.database import get_code_embedder, get_code_embed_model_name
+                _code_embed_engine = EmbeddingEngine(
+                    model_name=get_code_embed_model_name(),
+                    embedder=get_code_embedder(),
+                )
+            except Exception as _ce:
+                logger.warning(f"[EMBEDDING] Code embedder unavailable ({_ce}), falling back to general")
+                _code_embed_engine = None
+
+            _general_embed_engine = EmbeddingEngine(model_name=self.embedding_model)
+
+            _CODE_LANGUAGES = frozenset({
+                "python", "typescript", "javascript", "java", "cpp", "c",
+                "go", "rust", "ruby", "kotlin", "swift", "scala", "shell",
+                "bash", "sh", "tsx", "jsx",
+            })
+
+            def _pick_engine(chunk: dict) -> "EmbeddingEngine":
+                """Return the code embedder for code chunks, general for prose."""
+                if _code_embed_engine is None:
+                    return _general_embed_engine
+                meta = chunk.get("metadata") or {}
+                lang = (meta.get("language") or "").lower()
+                ftype = (meta.get("file_type") or "").lower()
+                if ftype == "code" or lang in _CODE_LANGUAGES:
+                    return _code_embed_engine
+                return _general_embed_engine
+
             embeddings = []
             chunk_embedding_map = {}  # Map chunk id to embedding
             phase4_start = time.time()
@@ -424,7 +455,8 @@ class ContextAwareIngestionPipeline:
                 for i, chunk in enumerate(enhanced_chunks):
                     try:
                         embed_start = time.time()
-                        embedding = embedding_engine.embed_text(chunk["content"])
+                        engine = _pick_engine(chunk)
+                        embedding = engine.embed_text(chunk["content"])
                         embed_time = time.time() - embed_start
                         embeddings.append(embedding)
                         chunk_embedding_map[chunk["id"]] = embedding
@@ -436,6 +468,7 @@ class ContextAwareIngestionPipeline:
                             sample_values = embedding[:3] if embedding else []
                             flow_logger.bind(tag="[EMBEDDING]").debug(
                                 f"chunk#{i} dim={vector_dim} t={embed_time*1000:.1f}ms "
+                                f"model={engine.model_name} "
                                 f"sample={sample_values} preview='{chunk_preview}...'"
                             )
                         
@@ -699,10 +732,21 @@ class ContextAwareIngestionPipeline:
             logger.info(f"  Ready for embedding: {len(embedding_ready)} child chunks")
             
             # Stage 4: Generate embeddings
-            logger.info("Stage 4: Generating embeddings...")
+            # ingest_codebase handles only source code — always use the
+            # code-specialized embedder for best retrieval quality.
+            logger.info("Stage 4: Generating embeddings (code-specialized model)...")
             embed_start = time.time()
-            embedding_engine = EmbeddingEngine(model_name=self.embedding_model)
-            
+            try:
+                from app.core.database import get_code_embedder, get_code_embed_model_name
+                embedding_engine = EmbeddingEngine(
+                    model_name=get_code_embed_model_name(),
+                    embedder=get_code_embedder(),
+                )
+                logger.info(f"  Using code-specialized embedder: {get_code_embed_model_name()}")
+            except Exception as _ce:
+                logger.warning(f"  Code embedder unavailable ({_ce}), falling back to general")
+                embedding_engine = EmbeddingEngine(model_name=self.embedding_model)
+
             # Extract texts for embedding
             texts_to_embed = [chunk["content"] for chunk in embedding_ready]
             embeddings = embedding_engine.embed_batch(texts_to_embed)
@@ -943,6 +987,9 @@ class ContextAwareIngestionPipeline:
             logger.info(f"  Created PDR pairs in {pdr_time:.2f}s")
             
             # Stage 4: Generate embeddings
+            # ingest_kt_documents handles prose (PDF/markdown/docs) exclusively —
+            # intentionally keeps the general-purpose embedder so doc retrieval,
+            # semantic cache, and LTM recall are unaffected by the code embedder.
             logger.info("Stage 4: Generating embeddings...")
             embed_start = time.time()
             embedding_engine = EmbeddingEngine(model_name=self.embedding_model)
