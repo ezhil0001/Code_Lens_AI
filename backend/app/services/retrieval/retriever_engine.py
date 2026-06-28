@@ -9,6 +9,7 @@ This module implements a dual-path retrieval system combining:
 """
 
 import logging
+import os
 import threading
 import time
 from typing import Dict, List, Optional, Tuple, Any
@@ -375,6 +376,45 @@ class _ChromaCollectionRetriever(BaseRetriever):
             return []
 
 
+class _PgVectorRetriever(BaseRetriever):
+    """pgvector-backed retriever — concurrency-safe via connection pool.
+
+    Uses ``PgVectorDocumentStore.query_similar()`` instead of a
+    ChromaDB collection, so it is **not** gated by the module-level
+    ``threading.Lock`` that serialises ChromaDB access.
+    """
+
+    store: Any
+    embeddings: Any
+    k: int = 20
+    metadata_filter: Optional[Dict[str, Any]] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+    ) -> List[Document]:
+        try:
+            query_embedding = self.embeddings.embed_query(query)
+            results = self.store.query_similar(
+                query_embedding=query_embedding,
+                top_k=self.k,
+                metadata_filter=self.metadata_filter,
+            )
+            docs: List[Document] = []
+            for r in results:
+                meta = {**r.get("metadata", {}), "score": r["score"], "retrieval_method": "pgvector"}
+                docs.append(Document(page_content=r["content"], metadata=meta))
+            return docs
+        except Exception as e:
+            logger.error(f"pgvector retrieval failed: {e}")
+            return []
+
+
 class HybridRetriever:
     """Hybrid retriever combining ChromaDB (dense) + BM25 (lexical)
     via LangChain's EnsembleRetriever (Reciprocal Rank Fusion).
@@ -435,6 +475,25 @@ class HybridRetriever:
             embeddings=self.embeddings,
             k=candidate_k,
         )
+
+        # pgvector gate: swap the vector leg when VECTOR_STORE_BACKEND includes "pgvector"
+        try:
+            from app.services.retrieval.pgvector_store import (
+                PgVectorDocumentStore, pgvector_enabled,
+            )
+            if pgvector_enabled():
+                self._pg_store = PgVectorDocumentStore()
+                self.vector_retriever = _PgVectorRetriever(
+                    store=self._pg_store,
+                    embeddings=self.embeddings,
+                    k=candidate_k,
+                )
+                logger.info(
+                    "✅ pgvector retriever active — ChromaDB lock bypassed "
+                    f"(VECTOR_STORE_BACKEND={os.getenv('VECTOR_STORE_BACKEND')})"
+                )
+        except Exception as _pg_init_err:
+            logger.warning(f"pgvector retriever init skipped: {_pg_init_err}")
 
         if documents_for_bm25:
             self.bm25_retriever = BM25Retriever.from_documents(documents_for_bm25)
@@ -654,6 +713,17 @@ class RetrieverEngine:
         # Initialize components
         self.query_expander = QueryExpander(embedding_model) if enable_query_expansion else None
         self.reranking_engine = RerankingEngine(reranker_model) if enable_reranking else None
+
+        # Bootstrap document_chunks table when pgvector store is active
+        try:
+            from app.services.retrieval.pgvector_store import (
+                ensure_document_chunks_table, pgvector_enabled,
+            )
+            if pgvector_enabled():
+                ensure_document_chunks_table()
+        except Exception as _pg_boot_err:
+            logger.warning(f"pgvector table bootstrap skipped: {_pg_boot_err}")
+
         self.hybrid_retriever = HybridRetriever(
             chroma_collection=chroma_collection,
             documents_for_bm25=documents_for_bm25,

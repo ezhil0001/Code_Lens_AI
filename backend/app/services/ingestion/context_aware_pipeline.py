@@ -479,7 +479,7 @@ class ContextAwareIngestionPipeline:
                 }
                 enriched_chunks.append(enriched_chunk)
             
-            # Batch store all chunks
+            # Batch store all chunks — ChromaDB (primary)
             with timed("[STORAGE]") as store_ctx:
                 vector_store.add_documents(enriched_chunks, embeddings)
                 store_ctx["vectors"] = len(enriched_chunks)
@@ -487,7 +487,19 @@ class ContextAwareIngestionPipeline:
             stored_count = len(enriched_chunks)
             logger.info(f"[PHASE-5] ✓ Stored {stored_count} vectors in ChromaDB (collection: {collection_id})")
             log_success("[STORAGE]", f"Persisted {stored_count} vectors → {collection_id}")
-            
+
+            # Parallel pgvector write — active only when VECTOR_STORE_BACKEND includes "pgvector"
+            try:
+                from app.services.retrieval.pgvector_store import (
+                    PgVectorDocumentStore, pgvector_enabled,
+                )
+                if pgvector_enabled():
+                    pg_store = PgVectorDocumentStore()
+                    pg_upserted = pg_store.insert_chunks(enriched_chunks, embeddings)
+                    logger.info(f"[PHASE-5] ✓ Also mirrored {pg_upserted} chunks → pgvector document_chunks")
+            except Exception as _pg_err:  # noqa: BLE001
+                logger.warning(f"[PHASE-5] pgvector mirror skipped: {_pg_err}")
+
             # Stage 6: Update manifest for incremental indexing
             logger.info("[PHASE-6] Updating manifest for incremental indexing...")
             for file_path in source_paths:
@@ -709,7 +721,19 @@ class ContextAwareIngestionPipeline:
             store_time = time.time() - store_start
             logger.info(f"  Stored in ChromaDB in {store_time:.2f}s")
             logger.info(f"  ChromaDB stats: {vector_store.get_statistics()}")
-            
+
+            # Mirror write to pgvector when VECTOR_STORE_BACKEND includes "pgvector"
+            try:
+                from app.services.retrieval.pgvector_store import (
+                    PgVectorDocumentStore, pgvector_enabled,
+                )
+                if pgvector_enabled():
+                    pg_store = PgVectorDocumentStore()
+                    pg_upserted = pg_store.insert_chunks(embedding_ready, embeddings)
+                    logger.info(f"  ✓ Also mirrored {pg_upserted} chunks → pgvector document_chunks")
+            except Exception as _pg_err:  # noqa: BLE001
+                logger.warning(f"  pgvector mirror skipped: {_pg_err}")
+
             # Calculate total metrics
             total_time = time.time() - start_time
             
@@ -938,7 +962,19 @@ class ContextAwareIngestionPipeline:
             vector_store.persist()
             store_time = time.time() - store_start
             logger.info(f"  Stored in ChromaDB in {store_time:.2f}s")
-            
+
+            # Mirror write to pgvector when VECTOR_STORE_BACKEND includes "pgvector"
+            try:
+                from app.services.retrieval.pgvector_store import (
+                    PgVectorDocumentStore, pgvector_enabled,
+                )
+                if pgvector_enabled():
+                    pg_store = PgVectorDocumentStore()
+                    pg_upserted = pg_store.insert_chunks(embedding_ready, embeddings)
+                    logger.info(f"  ✓ Also mirrored {pg_upserted} chunks → pgvector document_chunks")
+            except Exception as _pg_err:  # noqa: BLE001
+                logger.warning(f"  pgvector mirror skipped: {_pg_err}")
+
             # Calculate metrics
             total_time = time.time() - start_time
             
