@@ -6,7 +6,7 @@ from typing import List, Optional, Dict
 from dataclasses import dataclass
 from datetime import datetime
 
-from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
+from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader, TextLoader
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
 # Centralized debug logger — gives [FILE UPLOAD] / [SPLITTING] play-by-play
@@ -232,6 +232,8 @@ class MultiModalLoader:
                             loader = DirectoryLoader(
                                 path=str(directory_path),
                                 glob=f"**/{pattern}" if recursive else pattern,
+                                loader_cls=TextLoader,
+                                loader_kwargs={"encoding": "utf-8"},
                                 silent_errors=True,
                                 show_progress=True,
                             )

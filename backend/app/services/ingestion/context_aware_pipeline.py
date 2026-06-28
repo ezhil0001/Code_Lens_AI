@@ -419,23 +419,31 @@ class ContextAwareIngestionPipeline:
             logger.info("[PHASE-4] Generating embeddings...")
             log_step("[EMBEDDING]", f"model={self.embedding_model} chunks={len(enhanced_chunks)}")
 
-            try:
-                from app.core.database import get_code_embedder, get_code_embed_model_name
-                _code_embed_engine = EmbeddingEngine(
-                    model_name=get_code_embed_model_name(),
-                    embedder=get_code_embedder(),
-                )
-            except Exception as _ce:
-                logger.warning(f"[EMBEDDING] Code embedder unavailable ({_ce}), falling back to general")
-                _code_embed_engine = None
-
-            _general_embed_engine = EmbeddingEngine(model_name=self.embedding_model)
-
             _CODE_LANGUAGES = frozenset({
                 "python", "typescript", "javascript", "java", "cpp", "c",
                 "go", "rust", "ruby", "kotlin", "swift", "scala", "shell",
                 "bash", "sh", "tsx", "jsx",
             })
+
+            # Only load the 329 MB code embedder if at least one chunk is code.
+            _has_code_chunks = any(
+                (c.get("metadata") or {}).get("file_type", "").lower() == "code"
+                or (c.get("metadata") or {}).get("language", "").lower() in _CODE_LANGUAGES
+                for c in enhanced_chunks
+            )
+
+            _code_embed_engine = None
+            if _has_code_chunks:
+                try:
+                    from app.core.database import get_code_embedder, get_code_embed_model_name
+                    _code_embed_engine = EmbeddingEngine(
+                        model_name=get_code_embed_model_name(),
+                        embedder=get_code_embedder(),
+                    )
+                except Exception as _ce:
+                    logger.warning(f"[EMBEDDING] Code embedder unavailable ({_ce}), falling back to general")
+
+            _general_embed_engine = EmbeddingEngine(model_name=self.embedding_model)
 
             def _pick_engine(chunk: dict) -> "EmbeddingEngine":
                 """Return the code embedder for code chunks, general for prose."""
@@ -489,8 +497,17 @@ class ContextAwareIngestionPipeline:
             logger.info(f"[PHASE-4] ⏱  Total time: {phase4_time:.2f}s")
             
             # Stage 5: Store in ChromaDB
+            # Append to the active collection so the singleton RetrieverEngine
+            # and BM25 index continue to see ALL documents (old + new).
+            # A fresh timestamp collection is only created on the very first
+            # ingest run; subsequent uploads land in the same collection.
             logger.info("[PHASE-5] Storing vectors in ChromaDB...")
-            collection_id = f"documents_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+            try:
+                from app.services.ingestion.ingestion_service import IngestionService
+                _live = IngestionService.get_chroma_collection()
+                collection_id = _live.name
+            except Exception:
+                collection_id = f"documents_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
             log_step("[STORAGE]", f"backend=ChromaDB collection={collection_id} persist_dir={self.persist_directory}")
             
             vector_store = ChromaVectorStore(

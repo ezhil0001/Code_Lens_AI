@@ -277,7 +277,13 @@ async def response_node(state: dict, config: RunnableConfig = None) -> dict:
     except Exception as _eval_err:  # noqa: BLE001
         logger.debug("[RESPONSE_NODE] RAGAS eval skipped: %s", _eval_err)
 
-    return {"evaluation_queued": True, "nodes_visited": visited}
+    # Pass final_response through so astream_events on_chain_end can emit it
+    # as a fallback token event when the LLM streamed via on_chat_model_stream.
+    return {
+        "final_response": final,
+        "evaluation_queued": True,
+        "nodes_visited": visited,
+    }
 
 
 async def memory_write_node(state: dict, config: RunnableConfig = None) -> dict:

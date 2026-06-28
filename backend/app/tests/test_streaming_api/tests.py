@@ -126,7 +126,7 @@ async def _test_stream_graph_events_yields_done() -> TestResult:
             value: int
 
         b = StateGraph(_S)
-        b.add_node("n", lambda s, c: {"value": s["value"] + 1})
+        b.add_node("n", lambda s: {"value": s["value"] + 1})
         b.set_entry_point("n")
         b.add_edge("n", END)
         g = b.compile(checkpointer=MemorySaver())

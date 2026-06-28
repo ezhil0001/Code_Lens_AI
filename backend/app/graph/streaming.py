@@ -130,6 +130,9 @@ async def stream_graph_events(
         # Track run_ids of nodes that already streamed at least one LLM token.
         # Used to prevent on_chain_end from emitting a duplicate final_response.
         _streamed_run_ids: set[str] = set()
+        # Simpler guard: set to True the moment any on_chat_model_stream fires.
+        # If True, the response_node fallback is skipped (tokens already delivered).
+        _any_tokens_streamed: bool = False
 
         async for event in event_stream:
             kind: str = event.get("event", "")
@@ -147,8 +150,7 @@ async def stream_graph_events(
                         else str(chunk)
                     )
                     if token:
-                        # Record every parent chain run_id that produced a real
-                        # LLM token so on_chain_end can skip the fallback emit.
+                        _any_tokens_streamed = True
                         for parent_id in event.get("parent_ids", []):
                             _streamed_run_ids.add(parent_id)
                         _streamed_run_ids.add(run_id)
@@ -212,10 +214,10 @@ async def stream_graph_events(
 
             # ── Chain end — node checkpoint ───────────────────────────────────
             elif kind == "on_chain_end":
-                # When the synthesizer/response node finishes, emit final_response
-                # as a token event so the client always renders the answer even
-                # when the LLM call failed and astream_events never fired a
-                # on_chat_model_stream event.
+                # Emit final_response as a bulk token event when the LLM did
+                # NOT stream individual chunks (Groq with streaming disabled,
+                # or when on_chat_model_stream events are not propagated from
+                # sub-graphs through astream_events).
                 output = event.get("data", {}).get("output")
                 if isinstance(output, dict):
                     final_response = output.get("final_response")
@@ -224,14 +226,14 @@ async def stream_graph_events(
                         kw in node_name
                         for kw in ("synthesizer", "response", "generate", "code_generate", "doc_generate")
                     )
-                    # Guard: only emit as fallback when the LLM did NOT already
-                    # stream individual tokens for this node's run_id.
+                    # Only emit the fallback when no token events have been seen yet.
                     if (
                         is_response_node
                         and final_response
                         and isinstance(final_response, str)
-                        and run_id not in _streamed_run_ids
+                        and not _any_tokens_streamed
                     ):
+                        _any_tokens_streamed = True   # mark so we don't emit twice
                         yield format_sse(SSEEvent(
                             type="token",
                             data={"content": final_response},

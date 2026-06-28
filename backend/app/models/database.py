@@ -7,6 +7,7 @@ from sqlalchemy import Column, String, Integer, DateTime, Boolean, ForeignKey, T
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from uuid import uuid4
 import enum
 
 Base = declarative_base()
@@ -35,7 +36,7 @@ class Organization(Base):
     """
     __tablename__ = "organizations"
 
-    id = Column(String(36), primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid4()))
     name = Column(String(255), unique=True, index=True, nullable=False)
     description = Column(Text, nullable=True)
     slug = Column(String(255), unique=True, index=True, nullable=True)
@@ -64,7 +65,7 @@ class User(Base):
     """
     __tablename__ = "users"
 
-    id = Column(String(36), primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid4()))
     email = Column(String(255), unique=True, index=True, nullable=False)
     username = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
@@ -116,7 +117,7 @@ class Role(Base):
     """
     __tablename__ = "roles"
 
-    id = Column(String(36), primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid4()))
     name = Column(String(255), unique=True, index=True, nullable=False)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -145,7 +146,7 @@ class Permission(Base):
     """
     __tablename__ = "permissions"
 
-    id = Column(String(36), primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid4()))
     name = Column(String(255), unique=True, index=True, nullable=False)
     description = Column(Text, nullable=True)
     resource = Column(String(255), nullable=False)  # e.g., "users", "roles"
@@ -179,7 +180,7 @@ class APIKey(Base):
     """
     __tablename__ = "api_keys"
 
-    id = Column(String(36), primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid4()))
     user_id = Column(String(36), ForeignKey('users.id'), nullable=False)
     key = Column(String(255), unique=True, index=True, nullable=False)
     name = Column(String(255), nullable=True)
@@ -202,7 +203,7 @@ class RefreshToken(Base):
     """
     __tablename__ = "refresh_tokens"
 
-    id = Column(String(36), primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid4()))
     user_id = Column(String(36), ForeignKey('users.id'), nullable=False)
     token = Column(String(500), unique=True, index=True, nullable=False)
     is_revoked = Column(Boolean, default=False, index=True)
@@ -223,7 +224,7 @@ class AuditLog(Base):
     """
     __tablename__ = "audit_logs"
 
-    id = Column(String(36), primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid4()))
     user_id = Column(String(36), ForeignKey('users.id'), nullable=True)
     action = Column(String(255), nullable=False)
     resource = Column(String(255), nullable=False)
