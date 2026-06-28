@@ -279,6 +279,25 @@ class RAGPipelineFactory:
         """Alias for get_retriever() — returns the RetrieverEngine instance."""
         return self.retriever
 
+    def refresh_bm25_index(self) -> None:
+        """Rebuild the in-memory BM25 index from the current ChromaDB corpus.
+
+        Loads all documents via ``IngestionService.load_documents_for_bm25()``
+        and delegates to ``RetrieverEngine.refresh_bm25_index()``.  Intended
+        to be called as a background task after each successful ingest so that
+        lexical search immediately reflects newly added content.
+        """
+        try:
+            from app.services.ingestion.ingestion_service import IngestionService
+            documents = IngestionService.load_documents_for_bm25()
+            logger.info(
+                f"[BM25_REBUILD] Starting BM25 rebuild with {len(documents)} docs…"
+            )
+            self.retriever.refresh_bm25_index(documents)
+            logger.info("[BM25_REBUILD] ✅ BM25 index rebuild complete")
+        except Exception as _err:
+            logger.error(f"[BM25_REBUILD] ❌ Rebuild failed: {_err}", exc_info=True)
+
     def get_reranker(self):
         """Get the reranker component from the retriever (if available)."""
         # The reranker is stored as `reranking_engine` on RetrieverEngine

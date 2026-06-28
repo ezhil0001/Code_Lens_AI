@@ -7,7 +7,7 @@ All ingestion logic is orchestrated by ContextAwareIngestionPipeline in services
 Flow: HTTP Request → Route Handler → Service Layer → Detailed Logging
 """
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, BackgroundTasks
 from typing import List, Dict, Optional
 import logging
 from pathlib import Path
@@ -60,7 +60,10 @@ def _get_pipeline() -> ContextAwareIngestionPipeline:
 
 
 @router.post("/documents")
-async def ingest_documents(files: List[UploadFile] = File(...)):
+async def ingest_documents(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+):
     """
     Upload and ingest documents through the service layer.
     
@@ -184,6 +187,19 @@ async def ingest_documents(files: List[UploadFile] = File(...)):
             logger.error(f"❌ SERVICE LAYER ERROR: {str(e)}", exc_info=True)
             raise
         
+        # Schedule BM25 index rebuild as a background task so the HTTP response
+        # is not blocked.  The retriever will serve lexical queries with the
+        # previous (stale) index and log a warning while the rebuild runs.
+        def _rebuild_bm25() -> None:
+            try:
+                from app.services.pipeline_factory import get_pipeline_factory
+                get_pipeline_factory().refresh_bm25_index()
+            except Exception as _bg_err:
+                logger.error(f"[BM25_REBUILD] Background task error: {_bg_err}", exc_info=True)
+
+        background_tasks.add_task(_rebuild_bm25)
+        logger.info("[BM25_REBUILD] BM25 index rebuild scheduled as background task")
+
         # Clean up temp directory
         try:
             shutil.rmtree(temp_dir)
@@ -226,7 +242,7 @@ async def ingest_documents(files: List[UploadFile] = File(...)):
 
 
 @router.post("/url")
-async def ingest_url(url_data: dict):
+async def ingest_url(background_tasks: BackgroundTasks, url_data: dict):
     """
     Ingest content from a URL through the service layer.
     
@@ -292,6 +308,18 @@ async def ingest_url(url_data: dict):
             logger.error(f"❌ SERVICE LAYER ERROR: {str(e)}", exc_info=True)
             raise
         
+        # Schedule BM25 rebuild so newly ingested URL content is immediately
+        # visible to lexical search without a process restart.
+        def _rebuild_bm25_url() -> None:
+            try:
+                from app.services.pipeline_factory import get_pipeline_factory
+                get_pipeline_factory().refresh_bm25_index()
+            except Exception as _bg_err:
+                logger.error(f"[BM25_REBUILD] URL background task error: {_bg_err}", exc_info=True)
+
+        background_tasks.add_task(_rebuild_bm25_url)
+        logger.info("[BM25_REBUILD] BM25 index rebuild scheduled (URL ingest)")
+
         return {
             "status": result.get("status", "success"),
             "ingestion_session_id": ingestion_session_id,

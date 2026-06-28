@@ -528,9 +528,57 @@ class HybridRetriever:
             self.intent_detector = None
             self.adaptive_strategy = None
 
+        # Rebuild-in-progress flag — checked inside _retrieve_impl to warn callers.
+        # Set during refresh_bm25_index(); cleared on completion.
+        self._bm25_rebuild_in_progress = threading.Event()
+
     # ------------------------------------------------------------------ #
-    # Public API                                                          #
+    # BM25 refresh                                                        #
     # ------------------------------------------------------------------ #
+    def refresh_bm25_index(self, documents: List[Document]) -> None:
+        """Atomically replace the in-memory BM25Retriever with a freshly
+        built one from *documents*.
+
+        The ``_bm25_rebuild_in_progress`` event is set for the duration of
+        the rebuild so any concurrent ``_retrieve_impl`` call can log a
+        warning.  The critical section (swap) is protected by the existing
+        ``_filter_lock`` so no concurrent retrieval reads a half-updated
+        ``ensemble``.
+
+        Args:
+            documents: Full current corpus as LangChain Documents.
+                       Caller is responsible for loading these from ChromaDB
+                       via ``IngestionService.load_documents_for_bm25()``.
+        """
+        self._bm25_rebuild_in_progress.set()
+        try:
+            if not documents:
+                logger.warning(
+                    "refresh_bm25_index: called with empty corpus — "
+                    "BM25 index cleared, vector-only retrieval active."
+                )
+                with self._filter_lock:
+                    self.bm25_retriever = None
+                    self.ensemble = self.vector_retriever
+                return
+
+            t0 = time.time()
+            new_bm25 = BM25Retriever.from_documents(documents)
+            new_bm25.k = self.candidate_k
+
+            with self._filter_lock:
+                self.bm25_retriever = new_bm25
+                self.ensemble = EnsembleRetriever(
+                    retrievers=[self.vector_retriever, self.bm25_retriever],
+                    weights=[self.vector_weight, self.bm25_weight],
+                )
+
+            elapsed_ms = (time.time() - t0) * 1000
+            logger.info(
+                f"✅ BM25 index refreshed — {len(documents)} docs in {elapsed_ms:.0f} ms"
+            )
+        finally:
+            self._bm25_rebuild_in_progress.clear()
     def retrieve(
         self,
         query: str,
@@ -565,6 +613,15 @@ class HybridRetriever:
     ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         intent_dict: Optional[Dict[str, Any]] = None
         ensemble = self.ensemble
+
+        # Warn (non-blocking) if a BM25 rebuild is running in the background.
+        # We still serve the request with the *current* (stale) BM25 index.
+        if self._bm25_rebuild_in_progress.is_set():
+            logger.warning(
+                "[BM25_REBUILD] Search request arrived while BM25 index is being "
+                "rebuilt — serving with previous index; results may not include "
+                "the most recently ingested documents."
+            )
 
         # L1 FIX: serialize the mutate-use-restore region on `vector_retriever.metadata_filter`.
         # Without this lock, concurrent requests on the singleton retriever leak filters
@@ -734,7 +791,32 @@ class RetrieverEngine:
         )
         
         logger.info("RetrieverEngine initialized")
-    
+
+    # ------------------------------------------------------------------ #
+    # BM25 refresh (public)                                               #
+    # ------------------------------------------------------------------ #
+    def refresh_bm25_index(self, documents: Optional[List[Document]] = None) -> None:
+        """Rebuild the BM25 index from *documents* (or reload from ChromaDB).
+
+        Delegates to ``HybridRetriever.refresh_bm25_index()``.
+
+        Args:
+            documents: Pre-loaded corpus.  If *None*, the corpus is fetched
+                       fresh from ChromaDB via ``IngestionService``.
+        """
+        if documents is None:
+            try:
+                from app.services.ingestion.ingestion_service import IngestionService
+                documents = IngestionService.load_documents_for_bm25()
+                logger.info(
+                    f"[BM25_REBUILD] Loaded {len(documents)} docs from ChromaDB for refresh"
+                )
+            except Exception as _load_err:
+                logger.error(f"[BM25_REBUILD] Failed to load docs: {_load_err}", exc_info=True)
+                return
+
+        self.hybrid_retriever.refresh_bm25_index(documents)
+
     def retrieve(
         self,
         query: str,
