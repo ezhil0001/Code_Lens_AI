@@ -5,20 +5,24 @@ Entry point for every v2 chat request.  Builds the graph once at startup and
 reuses the compiled instance across all requests via get_supervisor_graph().
 
 Node execution order:
-  input_guardrail_node  → safety checks (injection, PII, token budget)
-  cache_check_node      → semantic cache lookup; hit → skip to response_node
-  memory_read_node      → load STM window + LTM facts
-  intent_classifier_node → classify query, set routing_decision + metadata_filter
-  [agent nodes]         → CodeAgent / DocAgent / DebugAgent / ArchAgent / WebAgent
-  synthesizer_node      → merge multi-agent outputs; single-agent is a pass-through
-  hil_check_node        → pause for human review if conditions are met
-  output_guardrail_node → code safety scan + PII leak scan + citation warnings
-  response_node         → assemble final SSE payload, write to cache + memory
+  input_guardrail_node    → safety checks (injection, PII, token budget)
+  cache_check_node        → semantic cache lookup; hit → skip to response_node
+  memory_read_node        → load STM window + LTM facts
+  intent_classifier_node  → LLM routing; returns 1–2 agent names
+  [agent nodes]           → dispatched in parallel via Send() for compound queries
+  synthesizer_node        → merge outputs; single-agent is a pass-through
+  hil_check_node          → pause for human review if confidence is low
+  output_guardrail_node   → code safety scan + PII leak scan + citation warnings
+  response_node           → assemble final SSE payload, write to cache + memory
 
-Conditional routing at intent_classifier_node dispatches to the correct
-agent based on routing_decision.  HYBRID queries go through CodeAgent first;
-the supervisor can be extended to run agents in parallel via the Send API
-when that latency becomes a bottleneck.
+Parallel fan-out
+----------------
+intent_classifier_node populates state["routing_agents"] with 1–2 agent names.
+dispatch_agents() reads that list and returns a list of Send() objects, one per
+agent.  LangGraph executes all Send()s in the same superstep so two agents run
+concurrently.  Each agent writes its answer into agent_responses under its own
+key; the _merge_agent_responses reducer in AgentState combines the dicts so no
+answer is lost.  The synthesizer then receives the full set.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from typing import Any, Optional
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
+from langgraph.types import Send
 
 from app.graph.nodes.intent_classifier import intent_classifier_node
 from app.graph.nodes.synthesizer import synthesizer_node as _real_synthesizer_node
@@ -293,18 +298,57 @@ def route_cache(state: dict) -> str:
     return "memory_read_node"
 
 
+def dispatch_agents(state: dict) -> list:
+    """
+    After intent_classifier_node: return a list of Send() objects, one per
+    agent in state["routing_agents"].
+
+    LangGraph executes all Send()s in the same superstep, so a two-agent
+    response (e.g. CodeAgent + DocAgent) runs in parallel rather than
+    sequentially.  Each Send() passes the full current state to the target
+    node so every agent sees the same query, retrieved memory, and routing
+    fields.
+
+    Fallback: if routing_agents is empty or the cache was already hit,
+    this returns a single Send to CodeAgent / response_node so the graph
+    never stalls.
+    """
+    # Cache hit path — nothing to dispatch to an agent
+    if state.get("cache_hit", False):
+        return [Send("response_node", state)]
+
+    agents: list[str] = state.get("routing_agents", [])
+
+    # Validate — drop any name that isn't a registered node
+    _valid = {"CodeAgent", "DocAgent", "DebugAgent", "ArchAgent", "WebAgent"}
+    valid_agents = [a for a in agents if a in _valid]
+
+    if not valid_agents:
+        logger.warning(
+            "[SUPERVISOR] routing_agents=%r contains no valid names — "
+            "falling back to CodeAgent",
+            agents,
+        )
+        valid_agents = ["CodeAgent"]
+
+    logger.info("[SUPERVISOR] dispatching agents=%s (parallel=%s)", valid_agents, len(valid_agents) > 1)
+    return [Send(agent, state) for agent in valid_agents]
+
+
+# Kept for backward compatibility with tests that call route_to_agent directly
 def route_to_agent(state: dict) -> str:
     """
-    After intent_classifier_node: dispatch to the correct agent node.
+    Legacy single-dispatch routing function — reads routing_decision and
+    returns the agent node name.
 
-    Falls back to CodeAgent if routing_decision is unrecognised — this
-    matches the existing AgenticRouter fallback behaviour.
+    This function is retained so existing tests that call route_to_agent()
+    directly continue to pass.  The graph itself now uses dispatch_agents()
+    which returns Send() objects for parallel execution.
     """
     if state.get("cache_hit", False):
         return "response_node"
 
     decision = state.get("routing_decision", "CodeAgent")
-
     _valid = {"CodeAgent", "DocAgent", "DebugAgent", "ArchAgent", "WebAgent"}
     if decision not in _valid:
         logger.warning(
@@ -312,7 +356,6 @@ def route_to_agent(state: dict) -> str:
             decision,
         )
         return "CodeAgent"
-
     return decision
 
 
@@ -388,16 +431,20 @@ def build_supervisor_graph(
 
     builder.add_edge("memory_read_node", "intent_classifier_node")
 
-    # Dispatch to agent
+    # Parallel fan-out: dispatch_agents() returns Send() objects so multiple
+    # agents can run in the same superstep for compound queries.
+    # The path map lists every valid destination so LangGraph can validate the
+    # graph at compile time even though Send() bypasses the string mapping at
+    # runtime.
     builder.add_conditional_edges(
         "intent_classifier_node",
-        route_to_agent,
+        dispatch_agents,
         {
-            "CodeAgent":  "CodeAgent",
-            "DocAgent":   "DocAgent",
-            "DebugAgent": "DebugAgent",
-            "ArchAgent":  "ArchAgent",
-            "WebAgent":   "WebAgent",
+            "CodeAgent":     "CodeAgent",
+            "DocAgent":      "DocAgent",
+            "DebugAgent":    "DebugAgent",
+            "ArchAgent":     "ArchAgent",
+            "WebAgent":      "WebAgent",
             "response_node": "response_node",
         },
     )
@@ -426,7 +473,8 @@ def build_supervisor_graph(
     graph = builder.compile(**compile_kwargs)
 
     logger.info(
-        "[SUPERVISOR] Graph compiled with %d nodes, checkpointer=%s",
+        "[SUPERVISOR] Graph compiled — nodes=%d, checkpointer=%s, "
+        "parallel_dispatch=Send()-based",
         len(builder.nodes),
         type(checkpointer).__name__ if checkpointer else "None",
     )

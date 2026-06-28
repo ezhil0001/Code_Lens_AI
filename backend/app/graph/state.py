@@ -2,8 +2,23 @@
 AgentState — Central LangGraph state schema shared across all graph nodes.
 
 Every node reads from this dict and returns only the fields it modified.
-The `messages` field uses operator.add as a reducer so parallel nodes can
-append without clobbering each other — standard LangGraph pattern.
+
+REDUCER FIELDS
+--------------
+messages:        Annotated[..., operator.add]
+    Standard LangGraph list-append reducer — parallel nodes each append
+    without clobbering each other.
+
+agent_responses: Annotated[Dict[str, str], _merge_agent_responses]
+    Dict-merge reducer introduced to support parallel agent fan-out via the
+    Send() API.  When two agents run in the same superstep (e.g. CodeAgent
+    and DocAgent both dispatched for a compound query), each writes a single
+    {agent_name: answer} entry.  Without this reducer LangGraph would apply
+    last-write-wins semantics and silently discard all but one agent's answer.
+    _merge_agent_responses(a, b) = {**a, **b} so every agent's contribution
+    is preserved and the synthesizer sees the full set.
+
+All other fields: last-write-wins (default LangGraph behaviour).
 
 Invariant: session_id must always be the namespaced form
 "{user_id}::{raw_session_id}" by the time it reaches any node.  The v2
@@ -18,6 +33,61 @@ import operator
 from typing import Annotated, Any, Dict, List, Optional, Sequence
 
 from langchain_core.messages import BaseMessage
+
+
+def _merge_agent_responses(existing: dict, update: dict) -> dict:
+    """
+    Merge reducer for agent_responses.
+
+    Called by LangGraph whenever more than one branch in the same superstep
+    writes to agent_responses.  Combines the two dicts so every parallel
+    agent's answer is preserved:
+
+        {"CodeAgent": "..."} merged with {"DocAgent": "..."}
+        → {"CodeAgent": "...", "DocAgent": "..."}
+
+    If two branches write the same agent key (shouldn't happen in practice),
+    the later write wins, matching normal last-write-wins expectation.
+    """
+    return {**existing, **update}
+
+
+def _merge_nodes_visited(existing: list, update: list) -> list:
+    """
+    Dedup-merge reducer for nodes_visited.
+
+    Each parallel agent reads the full nodes_visited list at the start of its
+    superstep, appends its own entry, and returns the complete list.  Without
+    this reducer LangGraph would raise InvalidUpdateError on concurrent writes.
+
+    This reducer unions the two lists by first-occurrence order so the trace
+    contains every unique visit without duplicating the shared prefix that
+    both agents copied before appending their own entry.
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for item in existing + update:
+        key = str(item)
+        if key not in seen:
+            merged.append(item)
+            seen.add(key)
+    return merged
+
+
+def _last_non_none(existing: Any, update: Any) -> Any:
+    """
+    Last-write-wins reducer that prefers a non-None update.
+
+    Used for active_agent: in single-agent queries the one agent sets it;
+    in parallel queries whichever agent finished last wins (the synthesizer
+    doesn't rely on active_agent for the multi-agent path).
+    """
+    return update if update is not None else existing
+
+
+def _merge_dicts(existing: dict, update: dict) -> dict:
+    """Dict-merge reducer: later write wins per key (same as agent_responses)."""
+    return {**existing, **update}
 
 
 class AgentState(dict):
@@ -35,6 +105,10 @@ class AgentState(dict):
         execution — LangGraph merges lists from concurrent nodes by
         concatenation (not last-write-wins).
 
+    agent_responses: Annotated[Dict[str, str], _merge_agent_responses]
+        Dict-merge so parallel Send() branches each contribute their own
+        {agent_name: answer} entry without overwriting each other.
+
     All other fields: last-write-wins (default LangGraph behaviour).
     """
 
@@ -51,7 +125,8 @@ class AgentState(dict):
 
     # ── Routing & intent ─────────────────────────────────────────────────────
     intent: Optional[str]            # "CODE_LOOKUP" | "DEBUG" | "ARCHITECTURE" | ...
-    routing_decision: Optional[str]  # "CodeAgent" | "DocAgent" | "DebugAgent" | ...
+    routing_decision: Optional[str]  # primary agent name (kept for backward-compat)
+    routing_agents: List[str]        # full list from LLM routing — may contain 1..N names
     routing_confidence: float
     metadata_filter: Optional[Dict[str, Any]]  # ChromaDB where= clause
 
@@ -61,10 +136,13 @@ class AgentState(dict):
     parent_contexts: Dict[str, str]
 
     # ── Agent outputs ─────────────────────────────────────────────────────────
-    agent_responses: Dict[str, str]  # agent_name → partial answer
-    active_agent: Optional[str]
-    tool_calls: List[Dict[str, Any]]
-    tool_results: List[Dict[str, Any]]
+    # Dict-merge reducer: parallel Send() branches each write one key → combined here
+    agent_responses: Annotated[Dict[str, str], _merge_agent_responses]
+    # last-non-none: whichever agent set active_agent last wins (harmless for multi)
+    active_agent: Annotated[Optional[str], _last_non_none]
+    # list-append reducers: parallel agents each contribute their own entries
+    tool_calls: Annotated[List[Dict[str, Any]], operator.add]
+    tool_results: Annotated[List[Dict[str, Any]], operator.add]
 
     # ── Memory ────────────────────────────────────────────────────────────────
     short_term_window: List[Dict[str, Any]]   # last N turns from PostgresChatMessageHistory
@@ -91,7 +169,8 @@ class AgentState(dict):
     # ── Observability ─────────────────────────────────────────────────────────
     span_id: Optional[str]
     graph_checkpoint_id: Optional[str]   # renamed: 'checkpoint_id' is reserved by LangGraph
-    nodes_visited: List[str]
+    # dedup-merge: parallel agents each read + extend the list; combine without duplication
+    nodes_visited: Annotated[List[str], _merge_nodes_visited]
     total_latency_ms: float
 
 
@@ -121,6 +200,7 @@ def make_initial_state(
         # Routing & intent
         "intent": None,
         "routing_decision": None,
+        "routing_agents": [],
         "routing_confidence": 0.0,
         "metadata_filter": None,
 
