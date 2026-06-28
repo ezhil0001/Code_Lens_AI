@@ -70,15 +70,9 @@ from app.services.scoped_factories import (  # noqa: E402
 class RAGPipelineFactory:
     """Compatibility shim — delegates every accessor to the four scoped factories.
 
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │  PR NOTE                                                             │
-    │  AgentBrain, AgenticRouter, SemanticExampleSelector,                │
-    │  FewShotPromptBuilder, and ChatMemoryManager are still constructed  │
-    │  here because ``app/api/chat.py`` and ``app/graph/supervisor_graph  │
-    │  .py`` reach into ``factory.agent_brain`` at startup.  Once those  │
-    │  two call-sites are migrated to ``Depends(get_memory_factory)`` /   │
-    │  ``Depends(get_prompt_factory)`` this class can be deleted.         │
-    └──────────────────────────────────────────────────────────────────────┘
+    All four sub-factories (RetrievalFactory, LLMClientFactory, MemoryFactory,
+    PromptFactory) are singletons; this class simply holds references to their
+    products so legacy call-sites continue to work without modification.
     """
 
     _instance: Optional["RAGPipelineFactory"] = None
@@ -112,51 +106,11 @@ class RAGPipelineFactory:
         self.prompt_builder = self._prompt_factory.get_prompt_builder()
         logger.info("  │  ✅ Prompt components ready")
 
-        # ── Legacy components (AgenticRouter + AgentBrain) ──────────────────
-        logger.info("  ├─ AgenticRouter…")
-        try:
-            from app.services.agents.agentic_router import AgenticRouter, RoutingConfig  # type: ignore
-            self.router = AgenticRouter(config=RoutingConfig())
-            logger.info("  │  ✅ AgenticRouter ready")
-        except Exception as _err:
-            logger.warning(f"  │  ⚠️  AgenticRouter unavailable: {_err}")
-            self.router = None
-
-        logger.info("  ├─ AgentBrain…")
-        try:
-            from app.services.agents.agent_brain import AgentBrain, AgentConfig  # type: ignore
-            config = AgentConfig(
-                enable_retrieval=True,
-                retrieve_k=5,
-                use_dynamic_weights=True,
-                enable_few_shot=True,
-                enable_memory=True,
-                enable_streaming=True,
-            )
-            self.agent_brain = AgentBrain(
-                config=config,
-                retriever_engine=self.retriever,
-                router=self.router,
-                example_selector=self.example_selector,
-                prompt_builder=self.prompt_builder,
-                memory_manager=self.memory_manager,
-                llm_client=self.llm_client,
-            )
-            logger.info("  └─ ✅ AgentBrain ready")
-        except Exception as _err:
-            logger.warning(f"  └─ ⚠️  AgentBrain unavailable: {_err}")
-            self.agent_brain = None
-
         # ── Observability ────────────────────────────────────────────────────
         self._init_observability()
         logger.info("✅ RAGPipelineFactory (shim) initialised\n")
 
     # ── Accessor API (unchanged surface for legacy callers) ─────────────────
-
-    def get_agent_brain(self):
-        if self.agent_brain is None:
-            raise RuntimeError("AgentBrain not initialised")
-        return self.agent_brain
 
     def get_retriever(self):
         return self.retriever
@@ -169,9 +123,6 @@ class RAGPipelineFactory:
 
     def get_llm(self):
         return self.llm_client
-
-    def get_router(self):
-        return self.router
 
     def get_memory_manager(self):
         return self.memory_manager
