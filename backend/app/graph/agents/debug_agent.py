@@ -258,7 +258,7 @@ async def debug_generate_node(state: dict, config: RunnableConfig = None) -> dic
             from langchain_core.messages import HumanMessage, SystemMessage  # type: ignore
             messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
             chunks: list[str] = []
-            async for chunk in llm.astream(messages):
+            async for chunk in llm.astream(messages, config):
                 piece = getattr(chunk, "content", "")
                 if piece:
                     chunks.append(piece)
