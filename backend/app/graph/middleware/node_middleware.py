@@ -14,8 +14,8 @@ across every node:
   programming error (KeyError, AttributeError) is not silently swallowed.
 
   OTEL: emits a span per node execution with node_name and session_id
-  attributes.  The Prometheus histogram gives per-node p95 latency visible
-  in Grafana without any additional instrumentation in the node itself.
+  attributes exported to Jaeger. Per-node latency is also visible in
+  Langfuse traces without any additional instrumentation in the node itself.
 
 Usage:
     builder.add_node(
@@ -63,7 +63,7 @@ def with_node_middleware(
         The async node function to wrap.  Must accept ``(state, config)``
         and return a partial state dict.
     node_name
-        Human-readable name used in logs, OTEL spans, and Prometheus labels.
+        Human-readable name used in logs, OTEL spans, and telemetry labels.
     enable_retry
         Set to ``False`` to disable retry logic entirely.
     max_retries
@@ -77,7 +77,7 @@ def with_node_middleware(
         ``asyncio.TimeoutError`` is **not** in ``retry_on`` by default —
         it propagates immediately.
     trace
-        If True, attempts to create an OTEL span and record Prometheus
+        If True, attempts to create an OTEL span and record node
         latency.  Silently skipped when the libraries are unavailable.
     """
 
@@ -157,7 +157,7 @@ def _optional_span(node_name: str, state: Dict[str, Any]):
 
 
 def _record_latency(node_name: str, elapsed_ms: float) -> None:
-    """Record per-node latency in the Prometheus histogram — best-effort."""
+    """Record per-node latency — best-effort, no-op when unavailable."""
     try:
         from app.observability.quality_metrics import NODE_LATENCY_MS  # type: ignore
         if NODE_LATENCY_MS is not None:

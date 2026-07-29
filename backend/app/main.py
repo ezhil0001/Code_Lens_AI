@@ -24,16 +24,6 @@ from app.models.database import Base
 from app.services.startup_service import StartupService
 from app.routes import auth, ingest
 
-# Prometheus metrics
-try:
-    from prometheus_client import Counter, Histogram, Gauge, generate_latest, CollectorRegistry, REGISTRY
-    from prometheus_client import start_http_server
-    PROMETHEUS_AVAILABLE = True
-except ImportError:
-    PROMETHEUS_AVAILABLE = False
-    logger = logging.getLogger(__name__)
-    logger.warning("prometheus-client not installed. Metrics will be unavailable.")
-
 # Hardening: Import token blacklist & rate limiter
 from app.auth.token_blacklist import get_token_blacklist_manager
 from app.middleware.rate_limiter import get_rate_limiter
@@ -187,84 +177,9 @@ app = FastAPI(
 
 # ==================== Middleware Stack ====================
 
-# Add Prometheus middleware first (if available)
-#
-# AUDIT FIX L1 + L3:
-#   L1 — Use the route TEMPLATE (e.g. "/api/v1/repo/{repo_id}") instead of
-#        request.url.path. Path parameters create unbounded label cardinality
-#        and will OOM the Prometheus server.
-#   L3 — asyncio.CancelledError (client disconnect, common with SSE) was being
-#        recorded as status_code=500 → false-positive 5xx alerts. We now record
-#        it as status_code="499" (nginx convention: client closed request) so
-#        SLO calculations can exclude it cleanly.
-#
-# Also splits TTFB (time-to-first-byte; user-perceived latency) from total
-# request duration (dominated by streaming-body length on SSE endpoints).
-if PROMETHEUS_AVAILABLE:
-    import asyncio as _asyncio
-    from time import perf_counter
-    from starlette.middleware.base import BaseHTTPMiddleware
-
-    def _resolve_route_template(request) -> str:
-        """Return the matched route template, falling back to a sentinel.
-
-        Critical for label cardinality — `request.url.path` would explode the
-        series count on any URL with path parameters.
-        """
-        route = request.scope.get("route")
-        if route is not None and getattr(route, "path", None):
-            return route.path
-        # Unmatched routes (404s, OPTIONS, etc.) bucket into one series.
-        return "unmatched"
-
-    class PrometheusMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):
-            method = request.method
-            route_template = _resolve_route_template(request)
-
-            active_connections.inc()
-            start = perf_counter()
-            ttfb_seconds: Optional[float] = None
-            status_code = "200"
-            outcome = "success"
-
-            try:
-                response = await call_next(request)
-                # First-byte signal: response headers are ready, even if body
-                # is still streaming. This is what users actually feel.
-                ttfb_seconds = perf_counter() - start
-                status_code = str(response.status_code)
-                return response
-            except _asyncio.CancelledError:
-                # Client disconnected mid-stream (typical for SSE). Not a 5xx.
-                status_code = "499"
-                outcome = "client_disconnect"
-                http_streams_cancelled.labels(endpoint=route_template).inc()
-                raise
-            except Exception:
-                status_code = "500"
-                outcome = "server_error"
-                raise
-            finally:
-                duration = perf_counter() - start
-                request_count.labels(
-                    method=method,
-                    endpoint=route_template,
-                    status_code=status_code,
-                    outcome=outcome,
-                ).inc()
-                request_duration.labels(
-                    method=method,
-                    endpoint=route_template,
-                ).observe(duration)
-                if ttfb_seconds is not None:
-                    request_ttfb.labels(
-                        method=method,
-                        endpoint=route_template,
-                    ).observe(ttfb_seconds)
-                active_connections.dec()
-
-    app.add_middleware(PrometheusMiddleware)
+# Observability is handled by Langfuse (LLM tracing, span-level latency,
+# token/cost tracking, and online evaluation) plus OpenTelemetry traces
+# exported to Jaeger. No in-process metrics middleware is required.
 
 # Add logging middleware (tracks all requests/responses)
 app.add_middleware(LoggingMiddleware)
@@ -327,101 +242,6 @@ async def health_check_v1():
         "version": "0.1.0",
         "environment": os.getenv("ENVIRONMENT", "development")
     }
-
-
-# ==================== Prometheus Metrics ====================
-
-if PROMETHEUS_AVAILABLE:
-    # ----- HTTP / transport metrics -----
-    # AUDIT FIX L1: `endpoint` carries the route TEMPLATE, never raw paths.
-    # AUDIT FIX L3: `outcome` distinguishes success / client_disconnect / server_error
-    #               so SLO PromQL can exclude client-side cancels.
-    request_count = Counter(
-        'http_requests_total',
-        'Total HTTP requests',
-        ['method', 'endpoint', 'status_code', 'outcome']
-    )
-
-    # AUDIT BUCKET-TUNING: covers the realistic latency range for an SSE-heavy
-    # backend (50ms health-checks → 120s long-streaming chats). Default buckets
-    # bunch under 1s and make p95/p99 calculation lossy at RAG scale.
-    request_duration = Histogram(
-        'http_request_duration_seconds',
-        'HTTP request latency (total — includes SSE body streaming)',
-        ['method', 'endpoint'],
-        buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0),
-    )
-
-    # NEW: Time-to-first-byte. This is what users actually feel for SSE.
-    request_ttfb = Histogram(
-        'http_request_ttfb_seconds',
-        'Time to first byte (user-perceived latency, SSE-aware)',
-        ['method', 'endpoint'],
-        buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0),
-    )
-
-    # NEW: Counter for SSE client disconnects — keep this separate from 5xx.
-    http_streams_cancelled = Counter(
-        'http_streams_cancelled_total',
-        'HTTP streams cancelled by client disconnect (asyncio.CancelledError)',
-        ['endpoint'],
-    )
-
-    active_connections = Gauge(
-        'http_active_connections',
-        'Active HTTP connections'
-    )
-
-    # ----- Chat / RAG pipeline metrics -----
-    chat_requests = Counter(
-        'chat_requests_total',
-        'Total chat requests',
-        ['status']
-    )
-
-    # AUDIT BUCKET-TUNING: retrieval is fast (vector DB hits in 50–500ms).
-    rag_retrieval_duration = Histogram(
-        'rag_retrieval_duration_seconds',
-        'RAG retrieval duration (vector + BM25 fusion)',
-        ['retriever_type'],
-        buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0),
-    )
-
-    vector_db_queries = Counter(
-        'vector_db_queries_total',
-        'Vector database queries',
-        ['operation', 'status']
-    )
-
-    # ----- Database metrics -----
-    db_connection_pool = Gauge(
-        'db_connection_pool_size',
-        'Database connection pool size'
-    )
-
-    db_query_duration = Histogram(
-        'db_query_duration_seconds',
-        'Database query duration',
-        ['operation'],
-        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
-    )
-
-
-@app.get("/metrics", tags=["monitoring"])
-async def metrics():
-    """
-    Prometheus metrics endpoint
-    
-    Used by Prometheus server to scrape application metrics.
-    Access at: http://localhost:8000/metrics
-    """
-    if not PROMETHEUS_AVAILABLE:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "Prometheus client not installed"}
-        )
-    
-    return generate_latest(REGISTRY)
 
 
 # ==================== Routes ====================

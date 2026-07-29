@@ -1,9 +1,9 @@
 """
-Tests for runtime observability — Prometheus metrics and Grafana dashboards.
+Tests for runtime observability — Langfuse tracing and OpenTelemetry (Jaeger).
 
-Every Prometheus instrument (histograms, counters) is checked at startup
-so a typo in a metric name is caught immediately rather than silently
-producing a flat line in Grafana for days before someone notices.
+The observability modules are import-checked at startup so a broken public
+API surface (e.g. a renamed callback or an unimportable evaluator) is caught
+immediately rather than silently degrading LLM tracing and evaluation.
 """
 
 SUITE_ID   = "H"

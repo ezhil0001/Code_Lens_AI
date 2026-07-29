@@ -31,7 +31,7 @@ RAGAS evaluation hook in the route handler
     The sources propagation bug meant evaluate_sample() never ran for any
     streaming request (response_holder["sources"] was never written to).
     Removing broken dead code is safer than shipping a non-functional harness.
-    Observability is handled by the Prometheus middleware and OTEL traces.
+    Observability is handled by Langfuse and OTEL traces.
 
 Fake word-by-word cache stream
     _create_cache_stream_response split on whitespace and slept 10 ms per

@@ -61,7 +61,6 @@ GitPython>=3.1.32
 beautifulsoup4>=4.12.0
 lark>=1.1.5
 python-json-logger>=2.0.7
-prometheus-client>=0.19.0
 
 # ==================== Testing ====================
 pytest>=7.4.3
@@ -123,7 +122,6 @@ tqdm>=4.65.0  # Progress bars
 opentelemetry-api>=1.21.0
 opentelemetry-sdk>=1.21.0
 opentelemetry-exporter-jaeger>=1.21.0  # Jaeger tracing backend
-opentelemetry-exporter-prometheus>=0.42b0  # Prometheus metrics export
 
 # OpenTelemetry Instrumentation
 opentelemetry-instrumentation>=0.42b0
@@ -139,7 +137,3 @@ datasets>=2.14.5  # Hugging Face datasets (already in requirements, confirmed ve
 
 # Local LLM Support (Ollama)
 ollama>=0.1.0  # Ollama Python client
-
-# ==================== Grafana & Monitoring ====================
-# (Deployed via Docker - no Python packages needed)
-

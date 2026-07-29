@@ -1,26 +1,27 @@
 """
 LangGraph Runtime Instrumentation
 ===================================
-Automatic OTEL span injection and Prometheus metric emission for every
-LangGraph node, without requiring individual nodes to import this module.
+Automatic OTEL span injection for every LangGraph node, without requiring
+individual nodes to import this module. Traces are exported to Jaeger, and
+LLM-level tracing / evaluation is handled by Langfuse.
 
 Two integration paths are provided so callers can choose the right trade-off
 between explicitness and convenience:
 
 1. Decorator path — ``instrument_node(node_fn, node_name=...)``
-   Wraps any async node function with timing, OTEL span, and Prometheus
-   metric recording. Use this when building the graph so every node emits
-   consistent telemetry without boilerplate in each node function.
+   Wraps any async node function with timing and an OTEL span. Use this when
+   building the graph so every node emits consistent telemetry without
+   boilerplate in each node function.
 
-2. Callback path — ``LangGraphPrometheusCallback``
+2. Callback path — ``LangGraphObservabilityCallback``
    A LangChain/LangGraph callback handler that listens to
-   ``on_chain_start`` / ``on_chain_end`` events and recordsNODE_LATENCY_MS``, ``GRAPH_EDGES_TRAVERSED``, ``AGENT_TOKENS``,
-   ``HIL_INTERRUPTS``, and ``LTM_LOOKUPS`` automatically from the
-   event stream — zero node modification required.
+   ``on_chain_start`` / ``on_chain_end`` events and records node timing,
+   edge traversal, token usage, HIL interrupts, and LTM lookups
+   automatically from the event stream — zero node modification required.
 
 Usage at graph build time:
     from app.observability.langgraph_instrumentation import (
-        instrument_node, LangGraphPrometheusCallback,
+        instrument_node, LangGraphObservabilityCallback,
     )
 
     # Wrap individual nodes
@@ -29,7 +30,7 @@ Usage at graph build time:
 
     # Attach callback to all invocations
     config = {
-        "callbacks": [LangGraphPrometheusCallback()],
+        "callbacks": [LangGraphObservabilityCallback()],
         "configurable": {...},
     }
 
@@ -47,7 +48,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prometheus metrics (imported from quality_metrics — declared once there)
+# Runtime metric handles (imported from quality_metrics — None sentinels;
+# emission is best-effort and no-ops when handles are unset).
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_metrics():
@@ -97,7 +99,7 @@ def instrument_node(
     node_name: str,
     agent_name: str = "unknown",
 ) -> Callable:
-    """Wrap an async LangGraph node with OTEL span + Prometheus timing.
+    """Wrap an async LangGraph node with an OTEL span + timing.
 
     Parameters
     ----------
@@ -106,7 +108,7 @@ def instrument_node(
         ``async def node(state: dict, config: RunnableConfig) -> dict``
     node_name
         Short human-readable name used as the OTEL span name and the
-        ``node_name`` Prometheus label value (e.g. ``"code_retrieve"``).
+        ``node_name`` telemetry label value (e.g. ``"code_retrieve"``).
     agent_name
         Which agent sub-graph this node belongs to (e.g. ``"CodeAgent"``).
         Used as the ``agent`` label on ``NODE_LATENCY_MS``.
@@ -170,17 +172,17 @@ def _emit_node_latency(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Callback path: LangGraphPrometheusCallback
+# Callback path: LangGraphObservabilityCallback
 # ─────────────────────────────────────────────────────────────────────────────
 
-class LangGraphPrometheusCallback:
+class LangGraphObservabilityCallback:
     """LangChain callback handler that records LangGraph runtime metrics.
 
     Attach to a graph invocation via the ``callbacks`` key in
     ``RunnableConfig``::
 
         config = {
-            "callbacks": [LangGraphPrometheusCallback()],
+            "callbacks": [LangGraphObservabilityCallback()],
             "configurable": {"thread_id": "..."},
         }
 
@@ -354,7 +356,7 @@ def record_hil_interrupt(reason: str) -> None:
 
 __all__ = [
     "instrument_node",
-    "LangGraphPrometheusCallback",
+    "LangGraphObservabilityCallback",
     "record_ltm_lookup",
     "record_hil_interrupt",
 ]

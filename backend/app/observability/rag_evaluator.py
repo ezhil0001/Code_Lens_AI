@@ -1,8 +1,8 @@
 """RAG Evaluation Framework — measures answer quality using Ragas metrics.
 
 Evaluates the RAG pipeline on four dimensions every time a response is
-generated. Results are stored in SQLite and exposed via Prometheus so
-quality regressions show up in Grafana before users notice them.
+generated. Results are stored in SQLite and streamed to Langfuse so
+quality regressions show up in the Langfuse dashboard before users notice them.
 
 1. **Faithfulness**: Does the answer use only the provided context?
 2. **Context Recall**: What percentage of ground truth is recalled?

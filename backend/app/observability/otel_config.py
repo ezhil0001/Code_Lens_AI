@@ -1,4 +1,4 @@
-"""OpenTelemetry Configuration — distributed tracing and metrics setup.
+"""OpenTelemetry Configuration — distributed tracing setup.
 
 Provides centralised OpenTelemetry initialisation for the full request
 pipeline. Traces flow from the FastAPI endpoint through the LangGraph
@@ -12,8 +12,9 @@ in Jaeger without adding per-function instrumentation everywhere.
 
 Exports traces to:
 1. Jaeger (tracing backend) - port 4317 (gRPC), 14268 (HTTP)
-2. Prometheus (metrics) - port 8888
-3. Grafana (visualization) - port 3000
+
+LLM-level tracing, token/cost tracking, and online evaluation are handled
+by Langfuse (see ``rag_evaluator.py`` and the README observability section).
 """
 
 import logging
@@ -29,10 +30,7 @@ try:
     from opentelemetry import trace, metrics
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
     from opentelemetry.exporter.jaeger.thrift import JaegerExporter
-    from opentelemetry.exporter.prometheus import PrometheusMetricReader
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
@@ -70,10 +68,6 @@ class OTelConfig:
     # Export batch settings
     BATCH_SPAN_SIZE: int = int(os.getenv("BATCH_SPAN_SIZE", "512"))
     BATCH_SCHEDULE_DELAY_MILLIS: int = int(os.getenv("BATCH_SCHEDULE_DELAY", "5000"))
-    
-    # Prometheus metrics
-    PROMETHEUS_PORT: int = int(os.getenv("PROMETHEUS_PORT", "8888"))
-    METRICS_ENDPOINT: str = "/metrics"
 
 
 # ==================== Jaeger Exporter Setup ====================
@@ -151,49 +145,6 @@ def setup_tracer_provider() -> Optional[TracerProvider]:
     
     except Exception as e:
         logger.error(f"Failed to setup tracer provider: {e}")
-        return None
-
-
-# ==================== Meter Provider Setup (Prometheus) ====================
-
-def setup_meter_provider() -> Optional[MeterProvider]:
-    """Setup OpenTelemetry Meter Provider for Prometheus metrics.
-    
-    Exports metrics to Prometheus:
-    - Histogram: latency metrics
-    - Counter: operation counts, error counts
-    - Gauge: cache sizes, active connections
-    
-    Returns:
-        Configured MeterProvider instance
-    """
-    if not HAS_OTEL:
-        return None
-    
-    try:
-        # Create Prometheus metric reader
-        prometheus_reader = PrometheusMetricReader()
-        
-        # Create resource
-        resource = Resource.create({
-            "service.name": OTelConfig.SERVICE_NAME,
-            "service.version": OTelConfig.SERVICE_VERSION,
-        })
-        
-        # Create meter provider
-        meter_provider = MeterProvider(
-            resource=resource,
-            metric_readers=[prometheus_reader]
-        )
-        
-        # Set global meter provider
-        metrics.set_meter_provider(meter_provider)
-        logger.info(f"✓ Meter provider configured for Prometheus")
-        
-        return meter_provider
-    
-    except Exception as e:
-        logger.error(f"Failed to setup meter provider: {e}")
         return None
 
 
@@ -555,7 +506,7 @@ def initialize_observability(app=None) -> bool:
         logger.warning(
             "OpenTelemetry not installed. Install with: "
             "pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-jaeger "
-            "opentelemetry-exporter-prometheus opentelemetry-instrumentation-fastapi "
+            "opentelemetry-instrumentation-fastapi "
             "opentelemetry-instrumentation-sqlalchemy"
         )
         return False
@@ -565,7 +516,6 @@ def initialize_observability(app=None) -> bool:
         
         # Setup providers
         setup_tracer_provider()
-        setup_meter_provider()
         
         # Setup auto-instrumentation
         setup_instrumentation(app)

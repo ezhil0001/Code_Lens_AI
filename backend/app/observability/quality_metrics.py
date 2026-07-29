@@ -1,175 +1,50 @@
-"""Quality metrics — RAGAS scores exported as Prometheus gauges.
+"""Quality metrics — RAGAS scores and LangGraph runtime signals.
 
-AUDIT FIX L4
-============
-The original observability documentation referenced
-``rag_faithfulness_score`` / ``rag_context_recall_score`` /
-``rag_answer_relevancy_score`` gauges, and ``alert-rules.yml`` shipped
-``LowFaithfullnessScore`` / ``LowContextRecall`` / ``LowAnswerRelevancy``
-alerts on top of them.
+Observability for CodeLens_AI is provided by **Langfuse** (LLM tracing,
+span-level latency, token/cost tracking, and online evaluation) together
+with OpenTelemetry traces exported to Jaeger.
 
-But the gauges were never declared anywhere in the codebase. The alerts
-could never fire — quality monitoring was *documented*, not *operational*.
+This module previously exported RAGAS scores and LangGraph runtime signals
+as in-process metrics. That path has been removed. The metric
+handles are retained as ``None`` sentinels and :func:`publish_ragas_scores`
+is kept as a stable no-op so the many best-effort call sites across the
+graph (``node_middleware``, guardrails, instrumentation helpers) continue
+to import and call into this module without change.
 
-This module:
-
-1. Declares the three RAGAS Prometheus gauges (and a sample counter that
-   the alert rules use to detect stale data).
-2. Exposes :func:`publish_ragas_scores` as the single sink for any RAGAS
-   evaluation result. ``RAGEvaluator`` calls it after each background
-   evaluation run.
-3. Keeps labels strictly bounded — only ``model`` and
-   ``retriever_strategy`` (both enum-valued in practice). Never
-   user_id / session_id / query_text — those would create a
-   cardinality bomb (see audit finding L1).
-
-Bucket-tuning note
-------------------
-RAGAS scores are bounded in [0.0, 1.0], so they're modelled as
-``Gauge`` (a single point-in-time value), not ``Histogram``. We rely on
-PromQL's ``avg_over_time(... [1h])`` to smooth judge variance — see
-``alert-rules.yml`` :: ``LowFaithfullnessScore``.
+RAGAS evaluation results are still computed asynchronously in
+``rag_evaluator.py``, persisted to SQLite, and streamed to Langfuse for
+trend analysis — see the README observability section.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping, Optional
+from typing import Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
-try:
-    from prometheus_client import Counter, Gauge, Histogram
-
-    _PROMETHEUS_AVAILABLE = True
-except ImportError:  # pragma: no cover - environment-only
-    _PROMETHEUS_AVAILABLE = False
-    Counter = Gauge = None  # type: ignore[assignment]
-
 
 # ---------------------------------------------------------------------------
-# Metric declarations (module scope — declared exactly once at import time).
+# Metric handles — retained as None sentinels for API compatibility.
+# All emission call sites already guard with `if <metric> is not None`.
 # ---------------------------------------------------------------------------
 
-if _PROMETHEUS_AVAILABLE:
-    RAG_FAITHFULNESS = Gauge(
-        "rag_faithfulness_score",
-        "Rolling-window faithfulness score from RAGAS (0.0–1.0). "
-        "Low values indicate the LLM is hallucinating relative to retrieved context.",
-        labelnames=["model", "retriever_strategy"],
-    )
-
-    RAG_CONTEXT_RECALL = Gauge(
-        "rag_context_recall_score",
-        "Rolling-window RAGAS context recall (0.0–1.0). "
-        "Low values indicate retrieval is missing relevant chunks.",
-        labelnames=["model", "retriever_strategy"],
-    )
-
-    RAG_ANSWER_RELEVANCY = Gauge(
-        "rag_answer_relevancy_score",
-        "Rolling-window RAGAS answer relevancy (0.0–1.0). "
-        "Low values indicate the LLM is answering off-topic.",
-        labelnames=["model", "retriever_strategy"],
-    )
-
-    RAG_CONTEXT_PRECISION = Gauge(
-        "rag_context_precision_score",
-        "Rolling-window RAGAS context precision (0.0–1.0). "
-        "Low values indicate the reranker is leaving noise high in the result list.",
-        labelnames=["model", "retriever_strategy"],
-    )
-
-    # Stale-data guard: alert rules join against rate(rag_quality_samples_total)
-    # so they don't fire while the evaluator is silent.
-    RAG_QUALITY_SAMPLES = Counter(
-        "rag_quality_samples_total",
-        "Number of RAGAS evaluations completed and published.",
-        labelnames=["model", "retriever_strategy"],
-    )
-
-    # ── LangGraph runtime metrics ─────────────────────────────────────────────
-
-    # How long each node takes — useful for finding which node is the bottleneck
-    # on slow requests. Sliced by agent so you can compare CodeAgent vs DebugAgent.
-    NODE_LATENCY_MS = Histogram(
-        "langgraph_node_latency_ms",
-        "Execution latency per LangGraph node in milliseconds.",
-        labelnames=["node_name", "agent"],
-        buckets=[10, 50, 100, 250, 500, 1000, 2500, 5000],
-    ) if _PROMETHEUS_AVAILABLE else None
-
-    # Tracks how often the guardrails block, scrub, or pass a request.
-    # A sudden spike in "blocked" events is a sign of an active injection attempt.
-    GUARDRAIL_EVENTS = Counter(
-        "langgraph_guardrail_events_total",
-        "Guardrail check events — passed, blocked, or scrubbed.",
-        labelnames=["check_name", "action"],
-    ) if _PROMETHEUS_AVAILABLE else None
-
-    # Token usage per agent helps estimate LLM cost. token_type splits
-    # prompt tokens from completion tokens so we can see where the budget goes.
-    AGENT_TOKENS = Histogram(
-        "langgraph_agent_tokens_total",
-        "LLM tokens consumed per agent per turn.",
-        labelnames=["agent_name", "token_type"],
-        buckets=[100, 500, 1000, 2000, 4000, 8000],
-    ) if _PROMETHEUS_AVAILABLE else None
-
-    # Edge traversal depth is a cheap proxy for query complexity.
-    # Very high values (>13) usually mean the graph hit a retry loop.
-    GRAPH_EDGES_TRAVERSED = Histogram(
-        "langgraph_edges_per_turn",
-        "Number of graph edges traversed per query.",
-        buckets=[1, 2, 3, 5, 8, 13, 21],
-    ) if _PROMETHEUS_AVAILABLE else None
-
-    # HIL interrupts tell us how often the confidence threshold is being hit.
-    # Sustained high interrupt rates mean the classifier needs tuning.
-    HIL_INTERRUPTS = Counter(
-        "langgraph_hil_interrupts_total",
-        "Total HIL interrupt events.",
-        labelnames=["reason"],
-    ) if _PROMETHEUS_AVAILABLE else None
-
-    # LTM lookup counter — tracks how often we actually retrieve long-term facts.
-    # A flat zero here indicates the long-term memory retrieve path is not being invoked.
-    LTM_LOOKUPS = Counter(
-        "langgraph_ltm_lookups_total",
-        "Long-term memory lookup events.",
-        labelnames=["result"],
-    ) if _PROMETHEUS_AVAILABLE else None
-
-else:  # pragma: no cover
-    RAG_FAITHFULNESS = None
-    RAG_CONTEXT_RECALL = None
-    RAG_ANSWER_RELEVANCY = None
-    RAG_CONTEXT_PRECISION = None
-    RAG_QUALITY_SAMPLES = None
-    NODE_LATENCY_MS = None
-    GUARDRAIL_EVENTS = None
-    AGENT_TOKENS = None
-    GRAPH_EDGES_TRAVERSED = None
-    HIL_INTERRUPTS = None
-    LTM_LOOKUPS = None
+RAG_FAITHFULNESS = None
+RAG_CONTEXT_RECALL = None
+RAG_ANSWER_RELEVANCY = None
+RAG_CONTEXT_PRECISION = None
+RAG_QUALITY_SAMPLES = None
+NODE_LATENCY_MS = None
+GUARDRAIL_EVENTS = None
+AGENT_TOKENS = None
+GRAPH_EDGES_TRAVERSED = None
+HIL_INTERRUPTS = None
+LTM_LOOKUPS = None
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-# Map RAGAS metric name → Prometheus gauge.
-_GAUGE_BY_METRIC: Mapping[str, Any] = (
-    {
-        "faithfulness": RAG_FAITHFULNESS,
-        "context_recall": RAG_CONTEXT_RECALL,
-        "answer_relevancy": RAG_ANSWER_RELEVANCY,
-        "context_precision": RAG_CONTEXT_PRECISION,
-    }
-    if _PROMETHEUS_AVAILABLE
-    else {}
-)
-
 
 def publish_ragas_scores(
     scores: Mapping[str, Optional[float]],
@@ -177,62 +52,19 @@ def publish_ragas_scores(
     model: str,
     retriever_strategy: str,
 ) -> None:
-    """Publish a RAGAS evaluation result to Prometheus gauges.
+    """No-op sink for RAGAS evaluation results.
 
-    Called from the background evaluation task in ``rag_evaluator.py``.
-
-    Parameters
-    ----------
-    scores
-        Mapping of RAGAS metric name to score in ``[0.0, 1.0]``. Missing or
-        ``None`` values are skipped (RAGAS sometimes returns NaN / None for
-        an individual metric while others succeed).
-    model
-        LLM identifier — bounded enum: ``"mistral-7b"``, ``"gpt-4o"``,
-        ``"deepseek-chat"``, etc.
-    retriever_strategy
-        Retrieval strategy — bounded enum: ``"hybrid"``, ``"dense_only"``,
-        ``"bm25_only"``, ``"pdr"``.
-
-    Notes
-    -----
-    Silent on missing dependencies / metrics so this never breaks a request
-    path. All emission failures are logged at DEBUG.
+    Kept for backward compatibility with ``rag_evaluator.py``. RAGAS scores
+    are streamed to Langfuse from the evaluator itself; this function no
+    longer emits any in-process metrics.
     """
-    if not _PROMETHEUS_AVAILABLE:
-        return
-
-    labels = {"model": model, "retriever_strategy": retriever_strategy}
-    published_any = False
-
-    for metric_name, value in scores.items():
-        gauge = _GAUGE_BY_METRIC.get(metric_name)
-        if gauge is None:
-            continue
-        if value is None:
-            continue
-        try:
-            score = float(value)
-        except (TypeError, ValueError):
-            logger.debug("Skipping non-numeric RAGAS score: %s=%r", metric_name, value)
-            continue
-        # RAGAS scores can occasionally come back NaN — skip those too.
-        if score != score:  # NaN check
-            continue
-        # Clamp to the documented [0, 1] range — defensive against judge
-        # models that occasionally return slightly out-of-bounds values.
-        score = max(0.0, min(1.0, score))
-        try:
-            gauge.labels(**labels).set(score)
-            published_any = True
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Failed to publish %s: %s", metric_name, exc)
-
-    if published_any and RAG_QUALITY_SAMPLES is not None:
-        try:
-            RAG_QUALITY_SAMPLES.labels(**labels).inc()
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Failed to increment quality samples counter: %s", exc)
+    logger.debug(
+        "publish_ragas_scores called (model=%s, strategy=%s) — "
+        "scores streamed via Langfuse.",
+        model,
+        retriever_strategy,
+    )
+    return None
 
 
 __all__ = [

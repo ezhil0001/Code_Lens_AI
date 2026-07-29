@@ -138,11 +138,9 @@ class RAGPipelineFactory:
         try:
             from app.observability.otel_config import (
                 setup_tracer_provider,
-                setup_meter_provider,
                 setup_instrumentation,
             )
             setup_tracer_provider()
-            setup_meter_provider()
             setup_instrumentation()
             logger.debug("✅ OpenTelemetry configured")
         except ImportError as e:

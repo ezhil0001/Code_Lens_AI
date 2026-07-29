@@ -317,7 +317,7 @@ async def input_guardrail_node(
 
         if not result.passed and result.severity == "block":
             visited.append("input_guardrail_node:blocked")
-            # Emit Prometheus counter if available
+            # Emit guardrail telemetry if available
             _emit_guardrail_metric(check.name, "blocked")
             violations.append({"check": check.name, "reason": result.violation})
             return {

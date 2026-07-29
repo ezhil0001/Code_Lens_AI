@@ -78,7 +78,7 @@ CodeLens AI solves all three. It retrieves the *right* 200 lines per question �
 | **2 — Retrieval** | `services/retrieval/` | Query expansion (3 variants for recall) → hybrid search via `EnsembleRetriever` (vector + BM25, weighted Reciprocal Rank Fusion) → adaptive weight tuning via `QueryIntentDetector` → top-20 candidates. |
 | **3 — Reranking** | `RerankingEngine` | BGE-reranker-v2-m3 cross-encoder scores all 20 query-document pairs jointly, returning the top-5. Bi-encoder retrieval is fast but approximate; cross-encoder reranking buys ~30% precision improvement on hard queries. |
 | **4 — Agent Brain** | `services/agents/` | Agentic router turns routing decisions into ChromaDB `where=` metadata filters (not decoration — a real data-layer constraint). Few-shot examples are selected by cosine similarity over a curated Q&A bank. Prompt is assembled with hallucination-prevention instructions, then streamed token-by-token via SSE. |
-| **5 — Observability** | `observability/rag_evaluator.py` | Async RAGAS evaluation (faithfulness, context recall, answer relevancy) runs as a `BackgroundTask` so user latency is unaffected. Results land in SQLite for trend tracking. |
+| **5 — Observability** | `observability/rag_evaluator.py` | Async RAGAS evaluation (faithfulness, context recall, answer relevancy) runs as a `BackgroundTask` so user latency is unaffected. Scores and traces stream to **Langfuse** for span-level latency, token/cost tracking, and evaluation trend analysis across the full retrieval → rerank → agent → generation path. |
 
 ---
 
@@ -180,8 +180,8 @@ A guessed session ID is now cryptographically useless without the matching `user
 | **Embedding model** | `all-mpnet-base-v2` (768d) | Consistent model across ingestion and retrieval — vector drift is impossible |
 | **Reranker** | `BAAI/bge-reranker-v2-m3` | Multilingual cross-encoder; ~30% precision improvement over bi-encoder retrieval alone |
 | **LLM** | Ollama (local) / Groq / OpenAI | Provider-agnostic thin client layer — swap via `.env` variable |
-| **Evaluation** | RAGAS | Faithfulness, context recall, answer relevancy scored asynchronously |
-| **Observability** | OpenTelemetry + Prometheus | Traces wired into retrieval and agent paths; Prometheus metrics for dashboards |
+| **Evaluation** | RAGAS + Langfuse | Faithfulness, context recall, answer relevancy scored asynchronously and streamed to Langfuse |
+| **Observability** | Langfuse | LLM tracing, span-level latency, token/cost tracking, and online evaluation across retrieval → rerank → agent → generation paths |
 
 ---
 
@@ -339,4 +339,4 @@ Building CodeLens AI end-to-end — ingestion to observability — taught three 
 
 ---
 
-*Built with FastAPI · Angular · LangChain · ChromaDB · pgvector · BAAI/bge-reranker-v2-m3 · Groq/Ollama · RAGAS · OpenTelemetry · psycopg_pool · Pydantic* 
+*Built with FastAPI · Angular · LangChain · LangGraph · ChromaDB · pgvector · BAAI/bge-reranker-v2-m3 · Groq/Ollama · RAGAS · Langfuse · psycopg_pool · Pydantic* 

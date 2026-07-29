@@ -84,42 +84,6 @@ services:
     networks:
       - codelens_network
 
-  # Optional: Prometheus Monitoring
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: codelens_prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - ./alert-rules.yml:/etc/prometheus/alert-rules.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    networks:
-      - codelens_network
-
-  # Optional: Grafana Dashboards
-  grafana:
-    image: grafana/grafana:latest
-    container_name: codelens_grafana
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
-      GF_INSTALL_PLUGINS: "grafana-piechart-panel"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
-      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
-      - ./grafana/dashboards:/var/lib/grafana/dashboards
-    depends_on:
-      - prometheus
-    networks:
-      - codelens_network
-
 # ============================================================================
 # NETWORKS & VOLUMES
 # ============================================================================
@@ -132,8 +96,6 @@ volumes:
   postgres_data:
   chromadb_data:
   redis_data:
-  prometheus_data:
-  grafana_data:
 
 # ============================================================================
 # QUICK START
@@ -170,7 +132,6 @@ volumes:
 # ChromaDB:       http://localhost:8001 (API key: see .env)
 # Redis:          localhost:6379 (password: see .env)
 # Jaeger:         http://localhost:16686 (trace visualization)
-# Prometheus:     http://localhost:9090 (metrics)
-# Grafana:        http://localhost:3000 (dashboards, admin/admin123)
+# Langfuse:       configured via LANGFUSE_* env vars (LLM tracing & evaluation)
 #
 # ============================================================================

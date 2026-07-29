@@ -14,7 +14,7 @@ Guardrails Tests
   F-011  node_middleware module importable
   F-012  with_node_middleware wraps function and preserves return value
   F-013  with_node_middleware retries on configured exception
-  F-014  GUARDRAIL_EVENTS Prometheus counter declared
+  F-014  GUARDRAIL_EVENTS handle declared
 """
 
 from __future__ import annotations
@@ -275,13 +275,10 @@ async def _test_guardrail_events_counter_declared() -> TestResult:
         return TestResult.skipped("quality_metrics not importable")
     if not hasattr(mod, "GUARDRAIL_EVENTS"):
         return TestResult.failed(
-            "GUARDRAIL_EVENTS Counter not declared in quality_metrics.py",
-            detail=(
-                "Add at module scope: "
-                "GUARDRAIL_EVENTS = Counter('langgraph_guardrail_events_total', ...)"
-            )
+            "GUARDRAIL_EVENTS handle not declared in quality_metrics.py",
+            detail="Expected GUARDRAIL_EVENTS sentinel at module scope",
         )
-    return TestResult.passed("GUARDRAIL_EVENTS Prometheus counter declared ✓")
+    return TestResult.passed("GUARDRAIL_EVENTS handle declared ✓")
 
 
 TESTS: list[PhaseTest] = [
@@ -324,7 +321,7 @@ TESTS: list[PhaseTest] = [
     PhaseTest(id="F-013", name="with_node_middleware retries on configured exception",
               description="Flaky node succeeds on 3rd attempt",
               run=_test_node_middleware_retries, critical=False, tags=["middleware"]),
-    PhaseTest(id="F-014", name="GUARDRAIL_EVENTS Prometheus counter declared",
+    PhaseTest(id="F-014", name="GUARDRAIL_EVENTS handle declared",
               description="quality_metrics.GUARDRAIL_EVENTS exists at module scope",
-              run=_test_guardrail_events_counter_declared, critical=False, tags=["metrics"]),
+              run=_test_guardrail_events_counter_declared, critical=False, tags=["obs"]),
 ]
