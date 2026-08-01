@@ -181,10 +181,13 @@ class StartupTestRunner:
         -------
         bool  —  True if every phase passed, False otherwise.
         """
-        enabled = os.getenv("STARTUP_TESTS_ENABLED", "true").lower()
+        # Default OFF in production (slow cold-starts, extra LLM/DB calls);
+        # can still be forced on with STARTUP_TESTS_ENABLED=true.
+        _default = "false" if os.getenv("ENVIRONMENT", "development") == "production" else "true"
+        enabled = os.getenv("STARTUP_TESTS_ENABLED", _default).lower()
         if enabled not in ("true", "1", "yes"):
             flow_logger.bind(tag="[STARTUP_TESTS]").info(
-                "⏭  Startup tests DISABLED (STARTUP_TESTS_ENABLED=false)"
+                "⏭  Startup tests DISABLED (STARTUP_TESTS_ENABLED=false or production)"
             )
             return True
 

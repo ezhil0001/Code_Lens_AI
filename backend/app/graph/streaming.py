@@ -109,7 +109,9 @@ async def stream_graph_events(
     ------
     str
         SSE-formatted strings ready to be streamed directly to the client.
-        Always ends with a ``done`` event.
+        On normal completion or a caught error, ends with a ``done`` event.
+        On client disconnect (GeneratorExit) it terminates silently without
+        emitting further events, per async-generator semantics.
     """
     try:
         # Resolve astream_events kwargs
@@ -250,6 +252,23 @@ async def stream_graph_events(
                     ts=time.time() * 1000,
                 ))
 
+        # Normal completion → emit exactly one terminal ``done`` event.
+        yield format_sse(SSEEvent(
+            type="done",
+            data={},
+            agent="Supervisor",
+            checkpoint_id="",
+            ts=time.time() * 1000,
+        ))
+
+    except GeneratorExit:
+        # Client disconnected / browser refresh / network drop → the consumer
+        # called ``aclose()`` and threw GeneratorExit into us at the suspended
+        # ``yield``. Python async-generator semantics forbid yielding during
+        # shutdown (doing so raises "async generator ignored GeneratorExit"),
+        # so we MUST NOT emit any SSE event here. Terminate silently.
+        raise
+
     except Exception as exc:  # noqa: BLE001
         logger.error("[STREAMING] Fatal error: %s", exc, exc_info=True)
         yield format_sse(SSEEvent(
@@ -259,9 +278,7 @@ async def stream_graph_events(
             checkpoint_id="",
             ts=time.time() * 1000,
         ))
-
-    finally:
-        # Always emit the done event so the client knows the stream has ended
+        # Still emit a terminal ``done`` so a connected client can finalize.
         yield format_sse(SSEEvent(
             type="done",
             data={},

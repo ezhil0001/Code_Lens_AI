@@ -1,8 +1,7 @@
 /**
- * AgentStreamService — Phase I: LangGraph v2 SSE typed event dispatcher
+ * AgentStreamService — LangGraph SSE typed event dispatcher
  *
- * Replaces the raw token/done handler in AIStreamService with a fully-typed
- * dispatcher that understands all 8 v2 SSE event types produced by
+ * Fully-typed dispatcher that understands all 8 SSE event types produced by
  * POST /api/v2/chat/stream.
  *
  * SSE Event types (from backend streaming.py):

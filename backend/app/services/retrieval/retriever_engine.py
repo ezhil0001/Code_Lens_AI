@@ -288,20 +288,32 @@ class RerankingEngine:
             return [], []
 
         try:
-            pairs = [[query, doc.get("content", "")] for doc in documents]
-            scores = self.cross_encoder.predict(
-    pairs,
-    convert_to_numpy=True,
-    show_progress_bar=False,
-    batch_size=32,   # CPU-la 32 optimal — MPS overhead illa
-)
+            from app.observability.tracing import span as _lf_span
+            with _lf_span(
+                "reranker.bge_cross_encoder",
+                kind="retriever",
+                input={"query": query[:200], "candidates": len(documents), "top_k": top_k},
+                metadata={"service": "RerankingEngine", "model": getattr(self, "model_name", "BAAI/bge-reranker-base")},
+            ) as _s:
+                pairs = [[query, doc.get("content", "")] for doc in documents]
+                scores = self.cross_encoder.predict(
+                    pairs,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                    batch_size=32,   # CPU-la 32 optimal — MPS overhead illa
+                )
 
-            scored = list(zip(documents, scores.tolist()))
-            scored.sort(key=lambda x: x[1], reverse=True)
+                scored = list(zip(documents, scores.tolist()))
+                scored.sort(key=lambda x: x[1], reverse=True)
 
-            top = scored[:top_k]
-            reranked_docs = [d for d, _ in top]
-            reranked_scores = [float(s) for _, s in top]
+                top = scored[:top_k]
+                reranked_docs = [d for d, _ in top]
+                reranked_scores = [float(s) for _, s in top]
+
+                _s.update(output={
+                    "returned": len(reranked_docs),
+                    "top_scores": [round(s, 4) for s in reranked_scores],
+                })
 
             logger.info(
                 f"BGE reranked {len(documents)} → top-{len(reranked_docs)} "
@@ -320,6 +332,23 @@ class RerankingEngine:
             fallback_scores = [
                 float(d.get("score", 0.0)) for d in fallback_docs
             ]
+            # Make the outage visible in Langfuse as an ERROR-level span
+            # (the primary span above exited via its exception handler).
+            try:
+                from app.observability.tracing import span as _lf_span
+                with _lf_span(
+                    "reranker.fail_soft",
+                    kind="event",
+                    input={"candidates": len(documents), "top_k": top_k},
+                    metadata={"service": "RerankingEngine", "fallback": "original-retrieval-order"},
+                ) as _fs:
+                    _fs.update(
+                        level="ERROR",
+                        status_message=f"{type(e).__name__}: {e}",
+                        output={"returned": len(fallback_docs)},
+                    )
+            except Exception:  # noqa: BLE001
+                pass
             logger.warning(
                 f"Reranker fail-soft: returning {len(fallback_docs)} candidates "
                 f"with original scores (top: {fallback_scores[0] if fallback_scores else 0.0:.3f})"
@@ -350,7 +379,15 @@ class _ChromaCollectionRetriever(BaseRetriever):
         run_manager: CallbackManagerForRetrieverRun,
     ) -> List[Document]:
         try:
-            query_embedding = self.embeddings.embed_query(query)
+            from app.observability.tracing import span as _lf_span
+            with _lf_span(
+                "embedding.embed_query",
+                kind="embedding",
+                input={"text_chars": len(query)},
+                metadata={"provider": "huggingface", "model": getattr(self.embeddings, "model_name", "unknown")},
+            ) as _es:
+                query_embedding = self.embeddings.embed_query(query)
+                _es.update(output={"dimensions": len(query_embedding)})
             query_kwargs: Dict[str, Any] = {
                 "query_embeddings": [query_embedding],
                 "n_results": self.k,
@@ -359,17 +396,27 @@ class _ChromaCollectionRetriever(BaseRetriever):
             # Apply Chroma metadata filter (P0 fix #2: enforce routing decision)
             if self.metadata_filter:
                 query_kwargs["where"] = self.metadata_filter
-            results = self.collection.query(**query_kwargs)
-            documents_text = (results.get("documents") or [[]])[0]
-            metadatas = (results.get("metadatas") or [[]])[0]
-            distances = (results.get("distances") or [[]])[0]
+            with _lf_span(
+                "chroma.vector_search",
+                kind="retriever",
+                input={"query": query[:200], "k": self.k, "filter": self.metadata_filter},
+                metadata={"service": "_ChromaCollectionRetriever", "store": "chromadb"},
+            ) as _rs:
+                results = self.collection.query(**query_kwargs)
+                documents_text = (results.get("documents") or [[]])[0]
+                metadatas = (results.get("metadatas") or [[]])[0]
+                distances = (results.get("distances") or [[]])[0]
 
-            docs: List[Document] = []
-            for text, meta, dist in zip(documents_text, metadatas, distances):
-                meta = dict(meta or {})
-                meta["score"] = float(1.0 - dist)
-                meta["retrieval_method"] = "vector"
-                docs.append(Document(page_content=text or "", metadata=meta))
+                docs: List[Document] = []
+                for text, meta, dist in zip(documents_text, metadatas, distances):
+                    meta = dict(meta or {})
+                    meta["score"] = float(1.0 - dist)
+                    meta["retrieval_method"] = "vector"
+                    docs.append(Document(page_content=text or "", metadata=meta))
+                _rs.update(output={
+                    "documents_retrieved": len(docs),
+                    "top_scores": [round(d.metadata.get("score", 0.0), 4) for d in docs[:5]],
+                })
             return docs
         except Exception as e:
             logger.error(f"Vector retrieval failed: {e}")
@@ -399,7 +446,15 @@ class _PgVectorRetriever(BaseRetriever):
         run_manager: CallbackManagerForRetrieverRun,
     ) -> List[Document]:
         try:
-            query_embedding = self.embeddings.embed_query(query)
+            from app.observability.tracing import span as _lf_span
+            with _lf_span(
+                "embedding.embed_query",
+                kind="embedding",
+                input={"text_chars": len(query)},
+                metadata={"provider": "huggingface", "model": getattr(self.embeddings, "model_name", "unknown")},
+            ) as _es:
+                query_embedding = self.embeddings.embed_query(query)
+                _es.update(output={"dimensions": len(query_embedding)})
             results = self.store.query_similar(
                 query_embedding=query_embedding,
                 top_k=self.k,

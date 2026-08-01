@@ -30,7 +30,8 @@ export interface HistoryResponse {
   providedIn: 'root',
 })
 export class SessionService {
-  private apiUrl = 'http://localhost:8000/api/v1';
+  private apiUrl = 'http://localhost:8000/api/v1';       // auth endpoints
+  private chatApiUrl = 'http://localhost:8000/api/v2/chat'; // chat endpoints (V2)
   private sessionId = new BehaviorSubject<string | null>(null);
   private userId = new BehaviorSubject<string | null>(null);
   public sessionId$ = this.sessionId.asObservable();
@@ -125,7 +126,7 @@ export class SessionService {
 
     return this.http
       .get<HistoryResponse>(
-        `${this.apiUrl}/chat/history/${sessionId}`,
+        `${this.chatApiUrl}/history/${sessionId}`,
         {
           headers: {
             'X-User-ID': userId,

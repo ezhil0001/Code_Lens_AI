@@ -133,6 +133,7 @@ class AgentState(dict):
     # ── Retrieval ─────────────────────────────────────────────────────────────
     retrieved_chunks: List[Dict[str, Any]]
     reranked_chunks: List[Dict[str, Any]]
+    rerank_scores: List[float]           # cross-encoder scores for reranked_chunks
     parent_contexts: Dict[str, str]
 
     # ── Agent outputs ─────────────────────────────────────────────────────────
@@ -168,6 +169,7 @@ class AgentState(dict):
 
     # ── Observability ─────────────────────────────────────────────────────────
     span_id: Optional[str]
+    langfuse_trace_id: Optional[str]     # deterministic trace id for eval scoring
     graph_checkpoint_id: Optional[str]   # renamed: 'checkpoint_id' is reserved by LangGraph
     # dedup-merge: parallel agents each read + extend the list; combine without duplication
     nodes_visited: Annotated[List[str], _merge_nodes_visited]
@@ -207,6 +209,7 @@ def make_initial_state(
         # Retrieval
         "retrieved_chunks": [],
         "reranked_chunks": [],
+        "rerank_scores": [],
         "parent_contexts": {},
 
         # Agent outputs
@@ -239,6 +242,7 @@ def make_initial_state(
 
         # Observability
         "span_id": None,
+        "langfuse_trace_id": None,
         "graph_checkpoint_id": None,
         "nodes_visited": [],
         "total_latency_ms": 0.0,

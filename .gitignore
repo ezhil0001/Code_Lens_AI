@@ -15,6 +15,8 @@ __pycache__/
 venv/
 env/
 .env
+.env.langfuse
+.env.*.local
 
 # Distribution / packaging
 *.egg-info/

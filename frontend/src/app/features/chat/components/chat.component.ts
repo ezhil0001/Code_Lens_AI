@@ -5,7 +5,6 @@ import { HttpClientModule } from '@angular/common/http';
 import { Subscription } from 'rxjs';
 import { MarkdownViewerComponent } from '../../../shared/components/markdown-viewer/markdown-viewer.component';
 import { CitationBadgeComponent } from '../../../shared/components/citation-badge/citation-badge.component';
-import { AIStreamService } from '../../../core/services/ai-stream.service';
 import { AgentStreamService, AgentActivityEntry, HILInterruptPayload } from '../../../core/services/agent-stream.service';
 import { IngestService } from '../../../core/services/ingest.service';
 import { Message, Citation } from '../../../data/models/message.model';
@@ -274,10 +273,6 @@ import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
             <span>Show Citations</span>
           </label>
           <label>
-            <input type="checkbox" [(ngModel)]="useV2Stream">
-            <span>Agent Stream (v2)</span>
-          </label>
-          <label *ngIf="useV2Stream">
             <input type="checkbox" [(ngModel)]="hilEnabled">
             <span>HIL Review</span>
           </label>
@@ -954,9 +949,6 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   isLoading = false;
   useHybridSearch = true;
   showCitations = true;
-
-  // v2 stream toggles
-  useV2Stream = true;
   hilEnabled = false;
 
   // HIL state
@@ -1003,63 +995,16 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   private subs = new Subscription();
 
   constructor(
-    private aiStreamService: AIStreamService,
     private agentStreamService: AgentStreamService,
     private ingestService: IngestService,
     private cdr: ChangeDetectorRef,
   ) {}
 
   ngOnInit() {
-    // ── v1 stream subscriptions (kept for backward compat) ────────
-    this.subs.add(
-      this.aiStreamService.streaming$.subscribe((token) => {
-        if (!this.useV2Stream && this.messages.length > 0) {
-          const lastIdx = this.messages.length - 1;
-          const last = this.messages[lastIdx];
-          if (last.role === 'assistant') {
-            const updated = { ...last, content: last.content + token };
-            this.messages = [
-              ...this.messages.slice(0, lastIdx),
-              updated,
-            ];
-            this.shouldScroll = true;
-            this.cdr.detectChanges();
-          }
-        }
-      })
-    );
-
-    this.subs.add(
-      this.aiStreamService.loading$.subscribe((loading) => {
-        if (!this.useV2Stream) {
-          this.isLoading = loading;
-          if (!loading && this.messages.length > 0) {
-            const lastIdx = this.messages.length - 1;
-            if (this.messages[lastIdx].role === 'assistant') {
-              const updated = { ...this.messages[lastIdx], isStreaming: false };
-              this.messages = [...this.messages.slice(0, lastIdx), updated];
-            }
-          }
-          this.cdr.detectChanges();
-        }
-      })
-    );
-
-    this.subs.add(
-      this.aiStreamService.error$.subscribe((error) => {
-        if (!this.useV2Stream && error && this.messages.length > 0) {
-          const lastIdx = this.messages.length - 1;
-          const updated = { ...this.messages[lastIdx], error };
-          this.messages = [...this.messages.slice(0, lastIdx), updated];
-          this.cdr.detectChanges();
-        }
-      })
-    );
-
-    // ── v2 stream subscriptions ───────────────────────────────────
+    // ── agent stream subscriptions ────────────────────────────────
     this.subs.add(
       this.agentStreamService.fullMessage$.subscribe((text) => {
-        if (this.useV2Stream && this.messages.length > 0) {
+        if (this.messages.length > 0) {
           const lastIdx = this.messages.length - 1;
           if (this.messages[lastIdx].role === 'assistant') {
             // Mutate the last message content in-place to avoid replacing the
@@ -1074,23 +1019,21 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
 
     this.subs.add(
       this.agentStreamService.loading$.subscribe((loading) => {
-        if (this.useV2Stream) {
-          this.isLoading = loading;
-          if (!loading && this.messages.length > 0) {
-            const lastIdx = this.messages.length - 1;
-            if (this.messages[lastIdx].role === 'assistant') {
-              const updated = { ...this.messages[lastIdx], isStreaming: false };
-              this.messages = [...this.messages.slice(0, lastIdx), updated];
-            }
+        this.isLoading = loading;
+        if (!loading && this.messages.length > 0) {
+          const lastIdx = this.messages.length - 1;
+          if (this.messages[lastIdx].role === 'assistant') {
+            const updated = { ...this.messages[lastIdx], isStreaming: false };
+            this.messages = [...this.messages.slice(0, lastIdx), updated];
           }
-          this.cdr.detectChanges();
         }
+        this.cdr.detectChanges();
       })
     );
 
     this.subs.add(
       this.agentStreamService.error$.subscribe((error) => {
-        if (this.useV2Stream && error && this.messages.length > 0) {
+        if (error && this.messages.length > 0) {
           const lastIdx = this.messages.length - 1;
           const updated = { ...this.messages[lastIdx], error };
           this.messages = [...this.messages.slice(0, lastIdx), updated];
@@ -1200,36 +1143,17 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
 
     this._prepareAssistantPlaceholder();
 
-    if (this.useV2Stream) {
-      // ── v2: LangGraph agent stream ─────────────────────────────
-      this.agentStreamService.sendMessage(message, this.currentSessionId, {
-        hilEnabled: this.hilEnabled,
-        hilThreshold: 0.5,
-      });
-    } else {
-      // ── v1: legacy RAG stream ──────────────────────────────────
-      const assistantMessage = this.messages[this.messages.length - 1];
-      this.aiStreamService.streamChatResponse(
-        message,
-        undefined,
-        this.useHybridSearch
-      ).subscribe({
-        error: (err) => {
-          assistantMessage.error = err.message;
-        }
-      });
-    }
+    this.agentStreamService.sendMessage(message, this.currentSessionId, {
+      hilEnabled: this.hilEnabled,
+      hilThreshold: 0.5,
+    });
   }
 
   /**
    * Stop ongoing stream
    */
   stopStreaming() {
-    if (this.useV2Stream) {
-      this.agentStreamService.cancelStream();
-    } else {
-      this.aiStreamService.cancelStream();
-    }
+    this.agentStreamService.cancelStream();
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────

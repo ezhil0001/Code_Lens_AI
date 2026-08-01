@@ -17,7 +17,7 @@ Security Features:
 """
 
 from typing import Optional, Dict, Any, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 import logging
 from uuid import uuid4
@@ -119,7 +119,7 @@ class AuthenticationService:
         is_admin = user.role and user.role.name == "admin" if user.role else False
         
         # Generate unique login session ID (Alhena uses "login-{timestamp}")
-        login_id = f"login-{int(datetime.utcnow().timestamp() * 1000)}"
+        login_id = f"login-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
         
         # Generate tokens with JTI for revocation tracking (security hardening)
         access_token, access_jti = create_access_token(
@@ -136,7 +136,7 @@ class AuthenticationService:
         user.refresh_token = refresh_token
         user.is_logged_in = True
         user.login_id = login_id
-        user.last_login_at = datetime.utcnow()
+        user.last_login_at = datetime.now(timezone.utc)
         user.last_login_ip = ip_address
         
         # Store access token JTI for revocation (if using audit log)
@@ -343,7 +343,7 @@ class AuthenticationService:
                     
                     if jti and exp:
                         # Convert Unix timestamp to datetime
-                        expiration_time = datetime.utcfromtimestamp(exp)
+                        expiration_time = datetime.fromtimestamp(exp, tz=timezone.utc)
                         # Add to blacklist
                         token_blacklist.revoke_token(jti, expiration_time)
                         logger.info(f"Access token revoked for user {user_id} (JTI: {jti})")

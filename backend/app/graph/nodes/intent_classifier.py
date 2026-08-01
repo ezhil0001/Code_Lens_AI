@@ -169,7 +169,10 @@ async def _llm_classify(query: str) -> tuple[List[str], float]:
     ]
 
     try:
-        response = await llm.ainvoke(messages)
+        # Hard timeout so a hung provider call can never stall the stream.
+        import asyncio, os
+        _timeout = float(os.getenv("INTENT_LLM_TIMEOUT_SECONDS", "15"))
+        response = await asyncio.wait_for(llm.ainvoke(messages), timeout=_timeout)
         raw = response.content if hasattr(response, "content") else str(response)
     except Exception as exc:
         raise RuntimeError(f"LLM invoke failed: {exc}") from exc

@@ -152,27 +152,38 @@ async def code_retrieve_node(state: dict, config: RunnableConfig = None) -> dict
             logger.warning("[code_retrieve_node] code embedder unavailable (%s) — using general", _ce)
             _code_emb = None
 
-        with _lock:
-            _prev_emb = hybrid.vector_retriever.embeddings if _code_emb else None
-            if _code_emb:
-                try:
-                    hybrid.vector_retriever.embeddings = _code_emb
-                except Exception:
-                    _code_emb = None  # retriever is immutable — skip swap
+        def _retrieve_with_code_embedder():
+            """Embedder swap + retrieval, executed in a worker thread (H-1).
 
-            try:
-                result = retriever.retrieve(
-                    query=query,
-                    top_k=10,
-                    metadata_filter=metadata_filter,
-                )
-            finally:
-                # Always restore the original embedder before releasing the lock
-                if _code_emb and _prev_emb is not None:
+            The lock is held inside the thread so the event loop is never
+            blocked by the embedding + Chroma + BM25 work (~100s of ms).
+            contextvars are copied by asyncio.to_thread, so Langfuse spans
+            keep nesting under the request trace.
+            """
+            nonlocal_code_emb = _code_emb
+            with _lock:
+                _prev_emb = hybrid.vector_retriever.embeddings if nonlocal_code_emb else None
+                if nonlocal_code_emb:
                     try:
-                        hybrid.vector_retriever.embeddings = _prev_emb
+                        hybrid.vector_retriever.embeddings = nonlocal_code_emb
                     except Exception:
-                        pass
+                        nonlocal_code_emb = None  # retriever is immutable — skip swap
+                try:
+                    return retriever.retrieve(
+                        query=query,
+                        top_k=10,
+                        metadata_filter=metadata_filter,
+                    )
+                finally:
+                    # Always restore the original embedder before releasing the lock
+                    if nonlocal_code_emb and _prev_emb is not None:
+                        try:
+                            hybrid.vector_retriever.embeddings = _prev_emb
+                        except Exception:  # noqa: BLE001
+                            logger.error("[code_retrieve_node] embedder restore FAILED — general embedder may be replaced")
+
+        import asyncio
+        result = await asyncio.to_thread(_retrieve_with_code_embedder)
 
         chunks = result.chunks if result else []
         logger.info("[code_retrieve_node] retrieved %d chunks (code embedder)", len(chunks))
@@ -190,21 +201,26 @@ async def code_rerank_node(state: dict, config: RunnableConfig = None) -> dict:
     visited.append("code_rerank_node")
 
     reranked: List[Dict] = chunks  # default: pass-through if reranker unavailable
+    scores: List[float] = []
     try:
         from app.services.pipeline_factory import get_pipeline_factory_cached
         factory = get_pipeline_factory_cached()
         reranker = getattr(factory, "get_reranker", None)
         if reranker and chunks:
-            # rerank() returns a (docs, scores) tuple — we only need the docs list
+            # rerank() returns a (docs, scores) tuple
             result = factory.get_reranker().rerank(query=query, documents=chunks, top_k=5)
-            reranked = result[0] if isinstance(result, tuple) else result
+            if isinstance(result, tuple):
+                reranked, scores = result[0], list(result[1] or [])
+            else:
+                reranked = result
         else:
             reranked = chunks[:5]
     except Exception as exc:  # noqa: BLE001
         logger.debug("[code_rerank_node] reranker unavailable: %s — using top-5 pass-through", exc)
         reranked = chunks[:5]
 
-    return {"reranked_chunks": reranked, "nodes_visited": visited}
+    # M-5: propagate cross-encoder scores for the retrieval_quality evaluator.
+    return {"reranked_chunks": reranked, "rerank_scores": scores, "nodes_visited": visited}
 
 
 async def code_pdr_node(state: dict, config: RunnableConfig = None) -> dict:

@@ -48,12 +48,18 @@ async def doc_retrieve_node(state: dict, config: RunnableConfig = None) -> dict:
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
         _lock = getattr(retriever, "_metadata_lock", threading.Lock())
-        with _lock:
-            result = retriever.retrieve(
-                query=query,
-                top_k=10,
-                metadata_filter=DOC_AGENT_METADATA_FILTER,
-            )
+
+        def _do_retrieve():
+            # H-1: sync retrieval + lock in a worker thread — never on the loop.
+            with _lock:
+                return retriever.retrieve(
+                    query=query,
+                    top_k=10,
+                    metadata_filter=DOC_AGENT_METADATA_FILTER,
+                )
+
+        import asyncio
+        result = await asyncio.to_thread(_do_retrieve)
         chunks = result.chunks if result else []
         logger.info("[doc_retrieve_node] retrieved %d doc chunks", len(chunks))
     except Exception as exc:  # noqa: BLE001
@@ -70,18 +76,23 @@ async def doc_rerank_node(state: dict, config: RunnableConfig = None) -> dict:
     visited.append("doc_rerank_node")
 
     reranked: List[Dict] = chunks[:5]
+    scores: List[float] = []
     try:
         from app.services.pipeline_factory import get_pipeline_factory_cached
         factory = get_pipeline_factory_cached()
         reranker = getattr(factory, "get_reranker", None)
         if reranker and chunks:
-            # rerank() returns a (docs, scores) tuple — we only need the docs list
+            # rerank() returns a (docs, scores) tuple
             result = factory.get_reranker().rerank(query=query, documents=chunks, top_k=5)
-            reranked = result[0] if isinstance(result, tuple) else result
+            if isinstance(result, tuple):
+                reranked, scores = result[0], list(result[1] or [])
+            else:
+                reranked = result
     except Exception as exc:  # noqa: BLE001
         logger.debug("[doc_rerank_node] reranker unavailable: %s", exc)
 
-    return {"reranked_chunks": reranked, "nodes_visited": visited}
+    # M-5: propagate cross-encoder scores for the retrieval_quality evaluator.
+    return {"reranked_chunks": reranked, "rerank_scores": scores, "nodes_visited": visited}
 
 
 async def doc_generate_node(state: dict, config: RunnableConfig = None) -> dict:

@@ -108,6 +108,20 @@ class Settings(BaseSettings):
     otel_exporter_endpoint: str = "http://localhost:4317"  # Jaeger gRPC
     jaeger_host: str = "localhost"
     jaeger_port: int = 6831
+
+    # ==================== Langfuse (LLM Observability & Evaluation) ====================
+    # Primary LLM observability platform. Self-hosted via
+    # docker-compose.langfuse.yml. Traces every LLM/agent/retrieval span with
+    # token usage, cost, latency, prompts/completions, and evaluation scores.
+    langfuse_enabled: bool = False
+    langfuse_host: str = "http://localhost:3000"
+    langfuse_public_key: Optional[str] = None   # pk-lf-...
+    langfuse_secret_key: Optional[str] = None   # sk-lf-...
+    langfuse_release: Optional[str] = None       # e.g. git SHA / app version
+    langfuse_environment: Optional[str] = None   # overrides `environment` in traces
+    langfuse_sample_rate: float = 1.0            # 0.0–1.0 trace sampling
+    langfuse_debug: bool = False
+    langfuse_flush_timeout_seconds: int = 5
     
     # ==================== CORS ====================
     cors_origins: str = "http://localhost:4200,http://localhost:8001"  # Comma-separated
@@ -148,6 +162,28 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore"
     )
+
+    def model_post_init(self, __context) -> None:  # noqa: D105
+        """C-4: refuse to boot in production with insecure defaults.
+
+        Fails fast with a clear error so a misconfigured deployment can
+        never issue forgeable JWTs or run against default DB credentials.
+        Development/staging behavior is unchanged.
+        """
+        if self.environment == "production":
+            problems = []
+            if self.secret_key == "your-secret-key-change-in-production" or len(self.secret_key) < 32:
+                problems.append(
+                    "SECRET_KEY is the insecure default or too short (<32 chars)"
+                )
+            if self.postgres_password in ("postgres", "codelens_password"):
+                problems.append("POSTGRES_PASSWORD is a well-known default")
+            if problems:
+                raise ValueError(
+                    "Refusing to start in production with insecure configuration:\n  - "
+                    + "\n  - ".join(problems)
+                    + "\nSet strong values via environment variables."
+                )
 
 
 # ==================== Database Engine & Session Management ====================
@@ -259,10 +295,12 @@ async def init_db():
         raise
 
 
-async def close_db():
+def close_db():
     """
-    Close database connections
-    Call this during app shutdown
+    Close database connections (H-4: sync — engine.dispose() does no async
+    work, and the previous ``async def`` was called un-awaited from the
+    lifespan shutdown, so the engine was never actually disposed).
+    Call this during app shutdown.
     """
     global _engine
     if _engine is not None:

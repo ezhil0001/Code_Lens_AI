@@ -171,6 +171,45 @@ async def hil_check_node(
     status_tag = "required" if hil_required else "passed"
     visited.append(f"hil_check_node:{status_tag}")
 
+    # ── H-2: TRUE interruption ────────────────────────────────────────────────
+    # If review is required and no human decision has been recorded yet,
+    # raise a LangGraph dynamic interrupt so the checkpoint is persisted and
+    # execution PAUSES. POST /api/v2/sessions/{id}/resume injects
+    # hil_approved + hil_human_input into the thread state and re-invokes the
+    # graph; on re-execution this node sees the decision and passes through.
+    already_decided = state.get("hil_approved") is not None
+    if hil_required and not already_decided:
+        try:
+            from langgraph.errors import NodeInterrupt  # type: ignore
+        except ImportError:  # older/newer layout
+            try:
+                from langgraph.types import NodeInterrupt  # type: ignore
+            except ImportError:
+                NodeInterrupt = None  # type: ignore
+        try:
+            from app.observability.langgraph_instrumentation import record_hil_interrupt
+            record_hil_interrupt(hil_reason or "hil_required")
+        except Exception:  # noqa: BLE001
+            pass
+        if NodeInterrupt is not None:
+            raise NodeInterrupt(hil_reason or "Human review required")
+        logger.error(
+            "[hil_check_node] NodeInterrupt unavailable — HIL cannot pause; "
+            "proceeding WITHOUT human review (degraded mode)"
+        )
+
+    # Human rejected the action → replace the response instead of proceeding.
+    if hil_required and already_decided and state.get("hil_approved") is False:
+        return {
+            "hil_required": False,
+            "hil_reason": hil_reason,
+            "final_response": (
+                "This action was rejected by a human reviewer"
+                + (f": {state.get('hil_human_input')}" if state.get("hil_human_input") else ".")
+            ),
+            "nodes_visited": visited,
+        }
+
     return {
         "hil_required": hil_required,
         "hil_reason": hil_reason,

@@ -390,7 +390,7 @@ async def get_current_user(
         # Fail-open: if blacklist check fails, continue with token validation
     
     # Validate token
-    user = AuthenticationService.verify_token(token, db)
+    user = AuthenticationService.verify_token(db, token)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

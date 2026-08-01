@@ -41,18 +41,33 @@ async def web_search_node(state: dict, config: RunnableConfig = None) -> dict:
 
     try:
         from tavily import TavilyClient  # type: ignore
-        client = TavilyClient(api_key=api_key)
-        response = client.search(query=query, max_results=5)
-        results = [
-            {
-                "id": f"web-{i}",
-                "url": r.get("url", ""),
-                "title": r.get("title", ""),
-                "content": r.get("content", "")[:2000],
-                "score": r.get("score", 0.0),
-            }
-            for i, r in enumerate(response.get("results", []))
-        ]
+        from app.observability.tracing import span as _lf_span
+        with _lf_span(
+            "tavily.search",
+            kind="tool",
+            input={"query": query[:300], "max_results": 5},
+            metadata={"api": "Tavily", "endpoint": "search", "http.method": "POST"},
+        ) as _s:
+            client = TavilyClient(api_key=api_key)
+            # H-1 / timeout hardening: Tavily's client is synchronous — run it
+            # in a worker thread with a hard timeout so a hung HTTP call can
+            # never block the event loop or stall the stream indefinitely.
+            import asyncio
+            response = await asyncio.wait_for(
+                asyncio.to_thread(client.search, query=query, max_results=5),
+                timeout=float(os.getenv("TAVILY_TIMEOUT_SECONDS", "10")),
+            )
+            results = [
+                {
+                    "id": f"web-{i}",
+                    "url": r.get("url", ""),
+                    "title": r.get("title", ""),
+                    "content": r.get("content", "")[:2000],
+                    "score": r.get("score", 0.0),
+                }
+                for i, r in enumerate(response.get("results", []))
+            ]
+            _s.update(output={"results": len(results), "urls": [r["url"] for r in results]})
         logger.info("[web_search_node] Tavily returned %d results", len(results))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[web_search_node] Tavily search failed: %s", exc)

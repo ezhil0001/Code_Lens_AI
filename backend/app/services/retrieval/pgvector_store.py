@@ -309,30 +309,47 @@ class PgVectorDocumentStore:
 
         results: List[Dict[str, Any]] = []
         try:
-            with pg_connection(register_pgvector=True) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(_SQL, final_params)
-                    rows = cur.fetchall()
-            for row in rows:
-                chunk_id, content, meta_raw, score = row
-                if isinstance(meta_raw, str):
-                    try:
-                        meta = json.loads(meta_raw)
-                    except Exception:
-                        meta = {}
-                else:
-                    meta = meta_raw or {}
-                meta["chunk_id"] = chunk_id
-                meta["score"]    = float(score)
-                meta["retrieval_method"] = "pgvector"
-                results.append(
-                    {
-                        "content": content,
-                        "metadata": meta,
-                        "score": float(score),
-                        "retrieval_method": "pgvector",
-                    }
-                )
+            from app.observability.tracing import span as _lf_span
+            with _lf_span(
+                "pgvector.query_similar",
+                kind="retriever",
+                input={"top_k": top_k, "filter": metadata_filter},
+                metadata={
+                    "service": "PgVectorDocumentStore",
+                    "operation": "SELECT",
+                    "table": "document_chunks",
+                    "distance_metric": "cosine",
+                },
+            ) as _s:
+                with pg_connection(register_pgvector=True) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(_SQL, final_params)
+                        rows = cur.fetchall()
+                for row in rows:
+                    chunk_id, content, meta_raw, score = row
+                    if isinstance(meta_raw, str):
+                        try:
+                            meta = json.loads(meta_raw)
+                        except Exception:
+                            meta = {}
+                    else:
+                        meta = meta_raw or {}
+                    meta["chunk_id"] = chunk_id
+                    meta["score"]    = float(score)
+                    meta["retrieval_method"] = "pgvector"
+                    results.append(
+                        {
+                            "content": content,
+                            "metadata": meta,
+                            "score": float(score),
+                            "retrieval_method": "pgvector",
+                        }
+                    )
+                _s.update(output={
+                    "rows_returned": len(results),
+                    "chunk_ids": [r["metadata"].get("chunk_id") for r in results[:20]],
+                    "top_scores": [round(r["score"], 4) for r in results[:5]],
+                })
         except Exception as exc:  # noqa: BLE001
             logger.error("[PgVectorStore] query_similar failed: %s", exc, exc_info=True)
 

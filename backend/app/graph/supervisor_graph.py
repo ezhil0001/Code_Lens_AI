@@ -98,6 +98,56 @@ except Exception as _agent_import_err:  # noqa: BLE001
 logger = logging.getLogger(__name__)
 
 
+# ── H-5: memoized agent sub-graph compilation ────────────────────────────────
+# Sub-graphs were previously rebuilt (StateGraph.compile) on EVERY request in
+# each agent node. Compiled LangGraph graphs are immutable and thread-safe to
+# reuse, so compile each one once per process.
+import threading as _threading
+
+_subgraph_cache: dict[str, Any] = {}
+_subgraph_lock = _threading.Lock()
+
+
+def _get_cached_subgraph(name: str, builder) -> Any:
+    """Return the compiled sub-graph for *name*, compiling at most once."""
+    g = _subgraph_cache.get(name)
+    if g is not None:
+        return g
+    with _subgraph_lock:
+        g = _subgraph_cache.get(name)
+        if g is None:
+            g = builder()
+            _subgraph_cache[name] = g
+            logger.info("[SUPERVISOR] %s sub-graph compiled and cached", name)
+    return g
+
+
+def _current_langfuse_trace_id() -> Optional[str]:
+    """Return the active Langfuse trace ID, or None. Never raises."""
+    try:
+        from app.observability.langfuse_client import get_current_trace_id
+        return get_current_trace_id()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _log_eval_future_result(fut: "Any") -> None:
+    """Done-callback for the background RAGAS evaluation future.
+
+    Ensures exceptions raised inside the executor are logged instead of being
+    silently swallowed (C-1). Never raises.
+    """
+    try:
+        exc = fut.exception()
+    except Exception:  # noqa: BLE001  (future cancelled)
+        return
+    if exc is not None:
+        logger.warning("[RESPONSE_NODE] RAGAS evaluation failed in background: %s", exc)
+    else:
+        logger.debug("[RESPONSE_NODE] RAGAS evaluation completed")
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Thin wrapper nodes — each one tries the real implementation first and falls
 # back to a no-op stub so the graph compiles and checkpoints correctly even
@@ -137,7 +187,7 @@ async def code_agent_node(state: dict, config: RunnableConfig = None) -> dict:
     """Run the CodeAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
-            graph = _build_code_agent()
+            graph = _get_cached_subgraph("CodeAgent", _build_code_agent)
             result_state = await graph.ainvoke(state, config or {})
             keys = ("active_agent", "agent_responses", "sources",
                     "retrieved_chunks", "reranked_chunks", "nodes_visited", "tool_calls")
@@ -156,7 +206,7 @@ async def doc_agent_node(state: dict, config: RunnableConfig = None) -> dict:
     """Run the DocAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
-            graph = _build_doc_agent()
+            graph = _get_cached_subgraph("DocAgent", _build_doc_agent)
             result_state = await graph.ainvoke(state, config or {})
             keys = ("active_agent", "agent_responses", "sources",
                     "retrieved_chunks", "reranked_chunks", "nodes_visited")
@@ -175,7 +225,7 @@ async def debug_agent_node(state: dict, config: RunnableConfig = None) -> dict:
     """Run the DebugAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
-            graph = _build_debug_agent()
+            graph = _get_cached_subgraph("DebugAgent", _build_debug_agent)
             result_state = await graph.ainvoke(state, config or {})
             keys = ("active_agent", "agent_responses", "sources",
                     "retrieved_chunks", "nodes_visited", "tool_calls")
@@ -194,7 +244,7 @@ async def arch_agent_node(state: dict, config: RunnableConfig = None) -> dict:
     """Run the ArchAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
-            graph = _build_arch_agent()
+            graph = _get_cached_subgraph("ArchAgent", _build_arch_agent)
             result_state = await graph.ainvoke(state, config or {})
             keys = ("active_agent", "agent_responses", "sources",
                     "retrieved_chunks", "nodes_visited")
@@ -213,7 +263,7 @@ async def web_agent_node(state: dict, config: RunnableConfig = None) -> dict:
     """Run the WebAgent sub-graph; falls back to an error message if unavailable."""
     if _AGENTS_AVAILABLE:
         try:
-            graph = _build_web_agent()
+            graph = _get_cached_subgraph("WebAgent", _build_web_agent)
             result_state = await graph.ainvoke(state, config or {})
             keys = ("active_agent", "agent_responses", "sources",
                     "tool_results", "nodes_visited")
@@ -254,6 +304,30 @@ async def response_node(state: dict, config: RunnableConfig = None) -> dict:
     visited = list(state.get("nodes_visited", []))
     visited.append("response_node")
 
+    # Resolve the trace id once for both evaluation pipelines.
+    # Prefer the CURRENT request's trace id from config (correct on checkpoint
+    # resume, where state still carries the original request's id — M-3);
+    # fall back to state, then ambient OTEL context.
+    trace_id = None
+    try:
+        trace_id = ((config or {}).get("configurable") or {}).get("langfuse_trace_id")
+    except Exception:  # noqa: BLE001
+        pass
+    trace_id = trace_id or state.get("langfuse_trace_id") or _current_langfuse_trace_id()
+
+    # F-4: evaluation runs exactly once per logical turn. On checkpoint resume
+    # / replay the graph re-enters response_node with state that already has
+    # evaluation_queued=True; skip re-scoring so we never publish duplicate
+    # RAGAS or online scores onto the trace.
+    already_evaluated = bool(state.get("evaluation_queued"))
+    if already_evaluated:
+        logger.debug("[RESPONSE_NODE] evaluation already performed for this turn — skipping")
+        return {
+            "final_response": final,
+            "evaluation_queued": True,
+            "nodes_visited": visited,
+        }
+
     # ── Fire-and-forget RAGAS evaluation ──────────────────────────────────────
     try:
         from app.observability.rag_evaluator import EvaluationSample, RAGEvaluator
@@ -270,12 +344,30 @@ async def response_node(state: dict, config: RunnableConfig = None) -> dict:
             answer=final,
             session_id=state.get("session_id", ""),
             source=state.get("intent", "HYBRID"),
+            trace_id=trace_id,
         )
         evaluator = RAGEvaluator.get_instance()
-        asyncio.create_task(evaluator.evaluate_sample(sample))
-        logger.debug("[RESPONSE_NODE] RAGAS evaluation task queued")
+        # C-1: evaluate_sample() is synchronous and does blocking RAGAS + judge
+        # LLM work. Run it off the event loop so streaming is never blocked, and
+        # log (not swallow) any failure via a done-callback.
+        loop = asyncio.get_running_loop()
+        eval_future = loop.run_in_executor(None, evaluator.evaluate_sample, sample)
+        eval_future.add_done_callback(_log_eval_future_result)
+        logger.debug("[RESPONSE_NODE] RAGAS evaluation scheduled (executor)")
     except Exception as _eval_err:  # noqa: BLE001
         logger.debug("[RESPONSE_NODE] RAGAS eval skipped: %s", _eval_err)
+
+    # ── Online code-evaluator suite (deterministic, sub-ms, trace-linked) ─────
+    # Publishes structure/citation/grounding/routing/guardrail scores onto the
+    # same trace via the SDK's background batch queue. Disjoint from the RAGAS
+    # score set, so no duplicate evaluations. No-op when unsampled/disabled.
+    try:
+        from app.observability.evaluation import evaluate_response_online
+        # M-3: pass the resolved trace id (config-first) so scores land on the
+        # current request's trace even on checkpoint resume.
+        evaluate_response_online(state, trace_id_override=trace_id)
+    except Exception as _code_eval_err:  # noqa: BLE001
+        logger.debug("[RESPONSE_NODE] online code evaluation skipped: %s", _code_eval_err)
 
     # Pass final_response through so astream_events on_chain_end can emit it
     # as a fallback token event when the LLM streamed via on_chat_model_stream.

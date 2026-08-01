@@ -6,8 +6,8 @@
 
 export const environment = {
   production: false,
-  apiUrl: 'http://localhost:8000',
-  wsUrl: 'ws://localhost:8000',
+  apiUrl: 'http://localhost:8001',
+  wsUrl: 'ws://localhost:8001',
   
   // Feature flags
   cacheEnabled: true,
@@ -16,16 +16,13 @@ export const environment = {
   
   // API endpoints
   endpoints: {
-    // v1 (kept for backward compat)
-    chat: '/api/v1/chat',
-    chatStream: '/api/v1/chat/stream',
     health: '/api/v1/health',
     healthDetailed: '/api/v1/health/detailed',
-    cacheStatus: '/api/v1/chat/cache/status',
-    cacheClear: '/api/v1/chat/cache/clear',
 
-    // v2 — LangGraph multi-agent streaming
+    // v2 — LangGraph multi-agent streaming + chat utilities
     chatStreamV2: '/api/v2/chat/stream',
+    cacheStatus: '/api/v2/chat/cache/status',
+    cacheClear: '/api/v2/chat/cache/clear',
     sessions: '/api/v2/sessions',   // base for /{id}/checkpoints, /resume, /branch, /replay
   },
   

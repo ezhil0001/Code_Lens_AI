@@ -48,6 +48,10 @@ async def _test_hil_triggers_on_low_confidence() -> TestResult:
         "nodes_visited": [],
     }
     try:
+        from langgraph.errors import NodeInterrupt
+    except Exception:
+        NodeInterrupt = None  # type: ignore[assignment]
+    try:
         result = await mod.hil_check_node(fake_state, {})
         if not result.get("hil_required"):
             return TestResult.failed(
@@ -55,6 +59,10 @@ async def _test_hil_triggers_on_low_confidence() -> TestResult:
             )
         return TestResult.passed("HIL triggered on low-confidence routing ✓")
     except Exception as exc:
+        if NodeInterrupt is not None and isinstance(exc, NodeInterrupt):
+            return TestResult.passed(
+                "HIL raised NodeInterrupt on low-confidence routing (true interrupt) ✓"
+            )
         return TestResult.error(exc)
 
 
@@ -70,6 +78,10 @@ async def _test_hil_triggers_on_destructive_keyword() -> TestResult:
         "nodes_visited": [],
     }
     try:
+        from langgraph.errors import NodeInterrupt
+    except Exception:
+        NodeInterrupt = None  # type: ignore[assignment]
+    try:
         result = await mod.hil_check_node(fake_state, {})
         if not result.get("hil_required"):
             return TestResult.failed(
@@ -77,6 +89,10 @@ async def _test_hil_triggers_on_destructive_keyword() -> TestResult:
             )
         return TestResult.passed("HIL triggered on destructive keyword ✓")
     except Exception as exc:
+        if NodeInterrupt is not None and isinstance(exc, NodeInterrupt):
+            return TestResult.passed(
+                "HIL raised NodeInterrupt on destructive keyword (true interrupt) ✓"
+            )
         return TestResult.error(exc)
 
 

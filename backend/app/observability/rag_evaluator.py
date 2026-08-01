@@ -71,6 +71,7 @@ class EvaluationSample:
     session_id: Optional[str] = None
     timestamp: Optional[datetime] = None
     source: Optional[str] = None  # Which query type (code, docs, etc.)
+    trace_id: Optional[str] = None  # Langfuse trace to attach scores to
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -446,7 +447,24 @@ class RAGEvaluator:
         if not self.has_ragas or not self.evaluator_llm:
             logger.warning("Ragas or Ollama not available - cannot evaluate")
             return self._fallback_evaluate(sample)
-        
+
+        # Background-job span: joins the originating request trace via
+        # sample.trace_id (M-2 — executor threads lose OTEL context, so we pin
+        # the trace explicitly) instead of rooting a separate trace.
+        from app.observability.tracing import span as _lf_span
+        with _lf_span(
+            "ragas.evaluate_sample",
+            kind="evaluator",
+            input={"query": sample.query[:300], "contexts": len(sample.retrieved_context)},
+            metadata={
+                "job.type": "ragas_evaluation",
+                "request.source": "background-job",
+            },
+            trace_id=getattr(sample, "trace_id", None),
+        ):
+            return self._evaluate_sample_inner(sample)
+
+    def _evaluate_sample_inner(self, sample: EvaluationSample) -> Optional[EvaluationResult]:
         try:
             start_time = time.time()
             
@@ -478,7 +496,9 @@ class RAGEvaluator:
                 model_used=self.eval_model,
             )
             
-            return EvaluationResult(sample=sample, metrics=metrics)
+            eval_result = EvaluationResult(sample=sample, metrics=metrics)
+            self._publish_to_langfuse(sample, metrics)
+            return eval_result
         
         except Exception as e:
             logger.error(f"Ragas evaluation failed: {e}. Using fallback.")
@@ -523,7 +543,46 @@ class RAGEvaluator:
             model_used="heuristic-fallback",
         )
         
+        self._publish_to_langfuse(sample, metrics)
         return EvaluationResult(sample=sample, metrics=metrics)
+
+    def _publish_to_langfuse(
+        self,
+        sample: "EvaluationSample",
+        metrics: "EvaluationMetrics",
+    ) -> None:
+        """Push evaluation scores onto the originating Langfuse trace.
+
+        Records faithfulness, context recall, answer relevancy, and the
+        aggregate as Langfuse scores so quality is visible per-trace and can be
+        aggregated in the Langfuse dashboard. Never raises — a scoring failure
+        must not affect evaluation or the request.
+        """
+        trace_id = getattr(sample, "trace_id", None)
+        if not trace_id:
+            return
+        try:
+            from app.observability.langfuse_client import score_current_trace, is_enabled
+            if not is_enabled():
+                return
+            score_map = {
+                "faithfulness": metrics.faithfulness,
+                "context_recall": metrics.context_recall,
+                "answer_relevancy": metrics.answer_relevancy,
+                "ragas_aggregate": metrics.aggregate_score,
+            }
+            for name, value in score_map.items():
+                score_current_trace(
+                    trace_id=trace_id,
+                    name=name,
+                    value=float(value),
+                    comment=f"model={metrics.model_used}",
+                    data_type="NUMERIC",
+                )
+            logger.debug("[rag_evaluator] published %d scores to Langfuse trace %s",
+                         len(score_map), trace_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[rag_evaluator] Langfuse score publish skipped: %s", exc)
     
     @staticmethod
     def _text_overlap(text1: str, text2: str) -> float:

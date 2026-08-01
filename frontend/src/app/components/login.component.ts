@@ -14,6 +14,7 @@ import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angula
 import { Router } from '@angular/router';
 import { HttpClient } from '@angular/common/http';
 import { SessionService } from '../core/services/session.service';
+import { environment } from '../../environments/environment';
 
 @Component({
   selector: 'app-login',
@@ -88,10 +89,13 @@ export class LoginComponent implements OnInit {
         
         if (error.status === 401) {
           this.errorMessage = 'Invalid email or password';
-        } else if (error.status === 0) {
-          // For development: allow offline login
+        } else if (error.status === 0 && !environment.production) {
+          // C-5: development-only offline login. NEVER reachable in
+          // production builds — a backend outage must not grant a session.
           console.warn('⚠️ Backend unreachable, creating development session');
           this.createDevelopmentSession();
+        } else if (error.status === 0) {
+          this.errorMessage = 'Cannot reach the server. Please try again later.';
         } else {
           this.errorMessage = 'Login failed. Please try again.';
         }
@@ -100,9 +104,13 @@ export class LoginComponent implements OnInit {
   }
 
   /**
-   * Create development session (for testing without backend)
+   * Create development session (for testing without backend).
+   * C-5: guarded — throws in production builds.
    */
   private createDevelopmentSession(): void {
+    if (environment.production) {
+      throw new Error('Development session is not available in production builds');
+    }
     const email = this.loginForm.get('email')?.value || 'dev@codelens.local';
     
     // Create development token

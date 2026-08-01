@@ -53,14 +53,20 @@ router = APIRouter(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_current_user_optional():
-    """Returns a dependency that yields a mock user when auth is unavailable.
+    """Return the REAL JWT auth dependency.
 
-    In production this is replaced by the real JWT dependency.
+    C-1 fix: previously imported ``get_current_user`` from ``app.auth.service``
+    (which never exported it), so the anonymous mock user silently bound in
+    production — every checkpoint/replay/branch/resume endpoint was
+    unauthenticated. The real dependency lives in ``app.routes.auth``.
+    The mock fallback is retained ONLY for stripped test environments where
+    the auth stack (python-jose / DB) cannot even be imported.
     """
     try:
-        from app.auth.service import get_current_user  # type: ignore
+        from app.routes.auth import get_current_user  # type: ignore
         return get_current_user
     except Exception:  # noqa: BLE001
+        logger.warning("[checkpoints] auth stack unavailable — anonymous dependency (non-prod only)")
         async def _mock_user():
             class _User:
                 id = "anonymous"
@@ -415,6 +421,15 @@ async def resume_after_hil(
         "hil_required": False,   # clear the interrupt flag
     }
 
+    # H-2: official LangGraph resume — write the human decision into the
+    # persisted thread state at the interrupted checkpoint, then re-invoke
+    # the graph with input=None so execution continues from hil_check_node
+    # (which now sees hil_approved set and passes through).
+    try:
+        await graph.aupdate_state(config, hil_state_update, as_node="hil_check_node")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[resume] aupdate_state failed (%s) — falling back to input merge", exc)
+
     logger.info(
         "[resume] user=%s session=%s approved=%s checkpoint=%s",
         current_user.id, session_id, body.approved, body.checkpoint_id,
@@ -430,7 +445,7 @@ async def resume_after_hil(
     )
 
     return StreamingResponse(
-        stream_graph_events(graph, hil_state_update, config),
+        stream_graph_events(graph, None, config),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

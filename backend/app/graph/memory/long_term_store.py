@@ -135,22 +135,30 @@ class LongTermStore:
             return []
 
         try:
-            # Embed the query
-            embedding: List[float] = embedder.embed_query(query)
-            embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+            from app.observability.tracing import span as _lf_span
+            with _lf_span(
+                "memory.ltm_retrieve",
+                kind="retriever",
+                input={"query": query[:200], "user_id": user_id, "top_k": top_k},
+                metadata={"service": "LongTermStore", "operation": "SELECT", "table": "long_term_memory"},
+            ) as _s:
+                # Embed the query
+                embedding: List[float] = embedder.embed_query(query)
+                embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
-            # Execute user-scoped cosine search
-            with pool.connection() as conn:
-                try:
-                    from pgvector.psycopg import register_vector  # type: ignore
-                    register_vector(conn)
-                except Exception:  # noqa: BLE001
-                    pass
-                rows = conn.execute(
-                    _RETRIEVE_QUERY, (user_id, embedding_str, top_k)
-                ).fetchall()
+                # Execute user-scoped cosine search
+                with pool.connection() as conn:
+                    try:
+                        from pgvector.psycopg import register_vector  # type: ignore
+                        register_vector(conn)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    rows = conn.execute(
+                        _RETRIEVE_QUERY, (user_id, embedding_str, top_k)
+                    ).fetchall()
 
-            facts = [row[0] for row in rows]
+                facts = [row[0] for row in rows]
+                _s.update(output={"facts_returned": len(facts)})
             logger.info("[LTM] retrieved %d facts for user=%s", len(facts), user_id)
             return facts
 

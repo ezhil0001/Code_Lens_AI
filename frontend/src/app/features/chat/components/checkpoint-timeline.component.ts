@@ -437,7 +437,7 @@ export class CheckpointTimelineComponent implements OnChanges {
     this.checkpoints = [];
     this.cdr.markForCheck();
 
-    const token = localStorage.getItem('access_token');
+    const token = localStorage.getItem('auth_token');
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
@@ -472,7 +472,7 @@ export class CheckpointTimelineComponent implements OnChanges {
     this.branchSuccessMsg = null;
     this.cdr.markForCheck();
 
-    const token = localStorage.getItem('access_token');
+    const token = localStorage.getItem('auth_token');
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 

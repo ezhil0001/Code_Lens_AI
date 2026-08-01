@@ -86,12 +86,18 @@ async def debug_retrieve_node(state: dict, config: RunnableConfig = None) -> dic
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
         _lock = getattr(retriever, "_metadata_lock", threading.Lock())
-        with _lock:
-            result = retriever.retrieve(
-                query=enriched_query,
-                top_k=10,
-                metadata_filter={"file_type": "code"},
-            )
+
+        def _do_retrieve():
+            # H-1: sync retrieval + lock in a worker thread — never on the loop.
+            with _lock:
+                return retriever.retrieve(
+                    query=enriched_query,
+                    top_k=10,
+                    metadata_filter={"file_type": "code"},
+                )
+
+        import asyncio
+        result = await asyncio.to_thread(_do_retrieve)
         chunks = result.chunks if result else []
         logger.info("[debug_retrieve_node] retrieved %d chunks", len(chunks))
     except Exception as exc:  # noqa: BLE001
@@ -113,12 +119,17 @@ async def debug_pattern_node(state: dict, config: RunnableConfig = None) -> dict
         retriever = factory.get_retriever_engine()
         import threading
         _lock = getattr(retriever, "_metadata_lock", threading.Lock())
-        with _lock:
-            result = retriever.retrieve(
-                query=f"error handling {query}",
-                top_k=3,
-                metadata_filter=None,
-            )
+
+        def _do_pattern_retrieve():
+            with _lock:
+                return retriever.retrieve(
+                    query=f"error handling {query}",
+                    top_k=3,
+                    metadata_filter=None,
+                )
+
+        import asyncio
+        result = await asyncio.to_thread(_do_pattern_retrieve)
         pattern_chunks = (result.chunks if result else [])[:3]
     except Exception as exc:  # noqa: BLE001
         logger.debug("[debug_pattern_node] pattern search failed: %s", exc)
@@ -158,12 +169,17 @@ async def debug_dependency_node(state: dict, config: RunnableConfig = None) -> d
             _lock = getattr(retriever, "_metadata_lock", threading.Lock())
             # Search for code that calls or imports the target function
             caller_query = f"calls {target_func} OR imports {target_func} OR {target_func}("
-            with _lock:
-                result = retriever.retrieve(
-                    query=caller_query,
-                    top_k=5,
-                    metadata_filter={"file_type": "code"},
-                )
+
+            def _do_caller_retrieve():
+                with _lock:
+                    return retriever.retrieve(
+                        query=caller_query,
+                        top_k=5,
+                        metadata_filter={"file_type": "code"},
+                    )
+
+            import asyncio
+            result = await asyncio.to_thread(_do_caller_retrieve)
             raw_callers = result.chunks if result else []
             # Filter to chunks that actually reference the function name
             for chunk in raw_callers:

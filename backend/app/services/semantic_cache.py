@@ -1,8 +1,8 @@
 """
 Semantic cache — pgvector-backed query deduplication.
 
-Extracted from app.api.chat so both the v1 compat endpoint and the v2
-LangGraph streaming endpoint can share the same cache instance.
+Shared singleton used by the V2 LangGraph streaming endpoint and cache
+management endpoints (app.api.chat).
 
 Usage::
 
@@ -43,10 +43,12 @@ class SemanticCache:
     """pgvector semantic cache scoped to *user_id*."""
 
     DEFAULT_TTL_SECONDS = 86_400  # 24 hours
+    EVICTION_EVERY_N = 20  # Z-4: lazy TTL sweep roughly every N writes
 
     def __init__(self, similarity_threshold: float = 0.95) -> None:
         self.similarity_threshold = similarity_threshold
         self.ttl_seconds = self.DEFAULT_TTL_SECONDS
+        self._set_counter = 0
         self._available = False
         try:
             self._init_backend()
@@ -131,67 +133,109 @@ class SemanticCache:
             if similarity_threshold is not None
             else self.similarity_threshold
         )
+        from app.observability.tracing import span as _lf_span
         try:
             from app.core.database import get_embedder, pg_connection
             import numpy as np
 
-            embedding = np.array(get_embedder().embed_query(query), dtype=np.float32)
-            with pg_connection(register_pgvector=True) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT query, response,
-                               1 - (embedding <=> %s::vector) AS similarity
-                        FROM   semantic_cache
-                        WHERE  user_id = %s
-                          AND  created_at > NOW() - (%s || ' seconds')::interval
-                        ORDER  BY embedding <=> %s::vector
-                        LIMIT  1;
-                        """,
-                        (embedding, user_id, str(self.ttl_seconds), embedding),
-                    )
-                    row = cur.fetchone()
-            if row is None:
-                return None
-            cached_query, cached_response, similarity = row
-            if float(similarity) < threshold:
-                return None
-            response_text = (
-                cached_response.get("response")
-                if isinstance(cached_response, dict)
-                else cached_response
-            )
-            logger.info(
-                "✅ Cache HIT [user=%s] cosine=%.4f ≥ %.2f  query='%s...'",
-                user_id, float(similarity), threshold, query[:60],
-            )
-            return {
-                "response": response_text,
-                "query": cached_query,
-                "similarity": float(similarity),
-            }
+            with _lf_span(
+                "semantic_cache.get",
+                kind="retriever",
+                input={"query": query[:200], "user_id": user_id, "threshold": threshold},
+                metadata={"service": "SemanticCache", "operation": "SELECT", "table": "semantic_cache"},
+            ) as _s:
+                embedding = np.array(get_embedder().embed_query(query), dtype=np.float32)
+                with pg_connection(register_pgvector=True) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT query, response,
+                                   1 - (embedding <=> %s::vector) AS similarity
+                            FROM   semantic_cache
+                            WHERE  user_id = %s
+                              AND  created_at > NOW() - (%s || ' seconds')::interval
+                            ORDER  BY embedding <=> %s::vector
+                            LIMIT  1;
+                            """,
+                            (embedding, user_id, str(self.ttl_seconds), embedding),
+                        )
+                        row = cur.fetchone()
+                if row is None:
+                    _s.update(output={"cache_hit": False})
+                    return None
+                cached_query, cached_response, similarity = row
+                if float(similarity) < threshold:
+                    _s.update(output={"cache_hit": False, "best_similarity": float(similarity)})
+                    return None
+                response_text = (
+                    cached_response.get("response")
+                    if isinstance(cached_response, dict)
+                    else cached_response
+                )
+                logger.info(
+                    "✅ Cache HIT [user=%s] cosine=%.4f ≥ %.2f  query='%s...'",
+                    user_id, float(similarity), threshold, query[:60],
+                )
+                _s.update(output={"cache_hit": True, "similarity": float(similarity)})
+                return {
+                    "response": response_text,
+                    "query": cached_query,
+                    "similarity": float(similarity),
+                }
         except Exception as exc:  # noqa: BLE001
             logger.error("SemanticCache GET failed: %s", exc)
             return None
 
     def set(self, query: str, response: str, user_id: str = "anonymous") -> None:
-        """Store *response* for *query* scoped to *user_id*. Silent on failure."""
+        """Store *response* for *query* scoped to *user_id*. Silent on failure.
+
+        Z-4 hardening:
+          * Dedup — an existing row for the exact (user_id, query) pair is
+            replaced instead of accumulating duplicates.
+          * Lazy TTL eviction — roughly every ``EVICTION_EVERY_N`` writes,
+            rows older than the TTL are deleted in the same transaction, so
+            the table cannot grow unbounded without needing a scheduler.
+        """
         if not self._available or not response:
             return
+        from app.observability.tracing import span as _lf_span
         try:
             from app.core.database import get_embedder, pg_connection
             import numpy as np
 
-            embedding = np.array(get_embedder().embed_query(query), dtype=np.float32)
-            payload = json.dumps({"response": response})
-            with pg_connection(register_pgvector=True) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO semantic_cache (user_id, query, response, embedding) "
-                        "VALUES (%s, %s, %s::jsonb, %s);",
-                        (user_id, query, payload, embedding),
-                    )
-                conn.commit()
+            with _lf_span(
+                "semantic_cache.set",
+                kind="span",
+                input={"query": query[:200], "user_id": user_id, "response_chars": len(response)},
+                metadata={"service": "SemanticCache", "operation": "INSERT", "table": "semantic_cache"},
+            ) as _s:
+                embedding = np.array(get_embedder().embed_query(query), dtype=np.float32)
+                payload = json.dumps({"response": response})
+                self._set_counter += 1
+                evict = (self._set_counter % self.EVICTION_EVERY_N) == 0
+                with pg_connection(register_pgvector=True) as conn:
+                    with conn.cursor() as cur:
+                        # Dedup: replace any existing entry for this exact query.
+                        cur.execute(
+                            "DELETE FROM semantic_cache WHERE user_id = %s AND query = %s;",
+                            (user_id, query),
+                        )
+                        cur.execute(
+                            "INSERT INTO semantic_cache (user_id, query, response, embedding) "
+                            "VALUES (%s, %s, %s::jsonb, %s);",
+                            (user_id, query, payload, embedding),
+                        )
+                        if evict:
+                            cur.execute(
+                                "DELETE FROM semantic_cache "
+                                "WHERE created_at < NOW() - (%s || ' seconds')::interval;",
+                                (str(self.ttl_seconds),),
+                            )
+                            evicted = cur.rowcount
+                            if evicted:
+                                logger.info("🧹 Cache eviction removed %d expired rows", evicted)
+                    conn.commit()
+                _s.update(output={"stored": True, "evicted": evict})
             logger.info("📝 Cache SET [user=%s]  query='%s...'", user_id, query[:60])
         except Exception as exc:  # noqa: BLE001
             logger.error("SemanticCache SET failed: %s", exc)

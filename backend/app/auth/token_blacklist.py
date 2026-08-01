@@ -13,11 +13,18 @@ Hardening Feature #1: JWT Revocation & Blacklisting
 
 import logging
 from typing import Optional, Set
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
 import json
 
 logger = logging.getLogger(__name__)
+
+
+def _to_aware_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to aware-UTC (naive values are assumed UTC)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 class TokenBlacklistBackend(ABC):
@@ -65,7 +72,7 @@ class InMemoryTokenBlacklist(TokenBlacklistBackend):
             True if added successfully
         """
         try:
-            self.blacklist[jti] = expiration_time
+            self.blacklist[jti] = _to_aware_utc(expiration_time)
             logger.debug(f"Token added to blacklist: {jti}")
             return True
         except Exception as e:
@@ -87,7 +94,7 @@ class InMemoryTokenBlacklist(TokenBlacklistBackend):
         
         # Check if token has expired
         expiration_time = self.blacklist[jti]
-        if datetime.utcnow() > expiration_time:
+        if datetime.now(timezone.utc) > expiration_time:
             # Remove expired token
             del self.blacklist[jti]
             return False
@@ -101,7 +108,7 @@ class InMemoryTokenBlacklist(TokenBlacklistBackend):
         Returns:
             Number of tokens removed
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired_jtis = [
             jti for jti, exp_time in self.blacklist.items()
             if exp_time < now
@@ -158,7 +165,7 @@ class RedisTokenBlacklist(TokenBlacklistBackend):
         try:
             key = f"{self.prefix}{jti}"
             # Calculate TTL in seconds
-            ttl = int((expiration_time - datetime.utcnow()).total_seconds())
+            ttl = int((_to_aware_utc(expiration_time) - datetime.now(timezone.utc)).total_seconds())
             
             if ttl <= 0:
                 logger.debug(f"Token already expired, not adding to blacklist: {jti}")

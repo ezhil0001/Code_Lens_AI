@@ -7,11 +7,14 @@ All ingestion logic is orchestrated by ContextAwareIngestionPipeline in services
 Flow: HTTP Request → Route Handler → Service Layer → Detailed Logging
 """
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, BackgroundTasks, Depends
 from typing import List, Dict, Optional
+import ipaddress
 import logging
+import socket
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse
 import tempfile
 import shutil
 
@@ -28,6 +31,126 @@ router = APIRouter(
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Auth dependencies (C-2)
+# ---------------------------------------------------------------------------
+
+def _resolve_user_dep():
+    """Return the real JWT dependency (app.routes.auth.get_current_user).
+
+    Falls back to an anonymous stub ONLY when the auth stack cannot be
+    imported (stripped test environments without python-jose / DB).
+    """
+    try:
+        from app.routes.auth import get_current_user  # type: ignore
+        return get_current_user
+    except Exception:  # noqa: BLE001
+        logger.warning("[ingest] auth stack unavailable — anonymous dependency (non-prod only)")
+        async def _anon():
+            class _User:
+                id = "anonymous"
+                email = "anonymous@local"
+                role = None
+            return _User()
+        return _anon
+
+
+_current_user_dep = _resolve_user_dep()
+
+
+def _is_admin(user) -> bool:
+    """True when the user's primary role is admin/superadmin."""
+    role = getattr(user, "role", None)
+    role_name = getattr(role, "name", None) or (role if isinstance(role, str) else None)
+    return str(role_name).lower() in ("admin", "superadmin")
+
+
+async def _require_admin(current_user=Depends(_current_user_dep)):
+    """Dependency: authenticated AND admin/superadmin. 403 otherwise."""
+    if not _is_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required for this operation",
+        )
+    return current_user
+
+
+# ---------------------------------------------------------------------------
+# SSRF protection (C-3)
+# ---------------------------------------------------------------------------
+
+_ALLOWED_URL_SCHEMES = ("http", "https")
+
+
+def _is_forbidden_ip(ip: str) -> bool:
+    """True for loopback, private (RFC1918), link-local, reserved, and
+    IPv6-local ranges — i.e. anything that could reach internal services
+    or cloud metadata endpoints (169.254.169.254)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True  # unparseable → reject
+    return (
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def validate_ingest_url(url: str) -> str:
+    """Validate a user-supplied URL against SSRF. Raises HTTPException(400).
+
+    Checks: scheme allowlist, hostname presence, and DNS resolution of the
+    host — EVERY resolved address must be public. This blocks localhost,
+    127.0.0.1, ::1, RFC1918, link-local/metadata (169.254.x.x), and DNS
+    names that resolve to internal addresses.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in _ALLOWED_URL_SCHEMES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"URL scheme {parsed.scheme!r} not allowed (http/https only)",
+        )
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="URL has no hostname",
+        )
+    # Literal IP fast path
+    try:
+        if _is_forbidden_ip(host):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="URL resolves to a forbidden (internal/private) address",
+            )
+        # host was a valid, public literal IP
+        ipaddress.ip_address(host)
+        return url
+    except ValueError:
+        pass  # hostname, not an IP literal → resolve via DNS
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"URL hostname could not be resolved: {exc}",
+        )
+    for info in infos:
+        ip = info[4][0]
+        if _is_forbidden_ip(ip):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="URL resolves to a forbidden (internal/private) address",
+            )
+    return url
+
+
 
 # Global pipeline instance (initialized on first use)
 _pipeline_instance: Optional[ContextAwareIngestionPipeline] = None
@@ -63,6 +186,7 @@ def _get_pipeline() -> ContextAwareIngestionPipeline:
 async def ingest_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
+    current_user=Depends(_current_user_dep),
 ):
     """
     Upload and ingest documents through the service layer.
@@ -242,7 +366,11 @@ async def ingest_documents(
 
 
 @router.post("/url")
-async def ingest_url(background_tasks: BackgroundTasks, url_data: dict):
+async def ingest_url(
+    background_tasks: BackgroundTasks,
+    url_data: dict,
+    current_user=Depends(_current_user_dep),
+):
     """
     Ingest content from a URL through the service layer.
     
@@ -272,6 +400,10 @@ async def ingest_url(background_tasks: BackgroundTasks, url_data: dict):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="URL is required"
             )
+
+        # C-3: SSRF protection — scheme allowlist + DNS resolution check
+        # rejecting loopback/private/link-local/metadata addresses.
+        validate_ingest_url(ingest_url)
         
         # Get ingestion pipeline
         pipeline = _get_pipeline()
@@ -344,7 +476,7 @@ async def ingest_url(background_tasks: BackgroundTasks, url_data: dict):
 
 
 @router.get("/status")
-async def get_ingestion_status():
+async def get_ingestion_status(current_user=Depends(_current_user_dep)):
     """
     Get ingestion status from the service layer.
     
@@ -378,9 +510,11 @@ async def get_ingestion_status():
 
 
 @router.delete("/clear")
-async def clear_documents():
+async def clear_documents(current_user=Depends(_require_admin)):
     """
     Clear all ingested documents through the service layer.
+
+    C-2: destructive — restricted to admin/superadmin users.
     
     Delegates to ContextAwareIngestionPipeline to clear ChromaDB collections
     and reset ingestion tracking.

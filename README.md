@@ -33,7 +33,7 @@ CodeLens AI solves all three. It retrieves the *right* 200 lines per question �
 │                            REQUEST LIFECYCLE                              │
 └──────────────────────────────────────────────────────────────────────────┘
 
-  Client ──► POST /api/v1/chat/stream
+  Client ──► POST /api/v2/chat/stream
                 │
                 ▼
   ┌─────────────────────┐   HIT   ┌─────────────────────────────────────┐
@@ -250,7 +250,58 @@ TAVILY_API_KEY=tvly-xx
 
 # Evaluation LLM
 EVAL_LLM_PROVIDER=groq     # groq | ollama
+
+# Langfuse (LLM observability & evaluation) — optional, off by default
+LANGFUSE_ENABLED=false
+LANGFUSE_HOST=http://localhost:3000
+LANGFUSE_PUBLIC_KEY=pk-lf-xxx
+LANGFUSE_SECRET_KEY=sk-lf-xxx
 ```
+
+### Observability — Self-Hosted Langfuse
+
+Langfuse is the primary LLM observability and evaluation platform. It captures a
+full trace for every chat request — intent routing, parallel agent dispatch,
+hybrid retrieval, reranking, prompt construction, LLM generation, guardrails,
+and human-in-the-loop — with token usage, cost, latency, prompts/completions,
+errors, and RAGAS evaluation scores attached per trace.
+
+**1. Start the self-hosted stack** (Langfuse web + worker, Postgres, ClickHouse, Redis, MinIO):
+
+```bash
+cp .env.langfuse.example .env.langfuse
+# Edit .env.langfuse: set NEXTAUTH_SECRET, SALT, and a 64-hex ENCRYPTION_KEY
+#   openssl rand -base64 32   # for NEXTAUTH_SECRET and SALT
+#   openssl rand -hex 32      # for ENCRYPTION_KEY
+
+docker compose -f docker-compose.langfuse.yml --env-file .env.langfuse up -d
+```
+
+**2. Create a project** — open http://localhost:3000, sign up, create an
+organization + project, then copy the generated API keys.
+
+**3. Point the backend at Langfuse** — in `backend/.env`:
+
+```bash
+LANGFUSE_ENABLED=true
+LANGFUSE_HOST=http://localhost:3000
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+```
+
+Restart the backend and send a chat request — the trace appears in the Langfuse
+UI within seconds. When `LANGFUSE_ENABLED=false` (default), all tracing is a
+safe no-op and the application runs unchanged.
+
+| URL | Service |
+|---|---|
+| http://localhost:3000 | Langfuse UI (traces, sessions, scores, dashboards) |
+| http://localhost:9091 | MinIO console (blob store; optional) |
+
+> Distributed request/infra spans are still exported to **Jaeger** via
+> OpenTelemetry (`OTEL_ENABLED=true`). Langfuse owns the LLM-level view;
+> Jaeger owns the system-level view.
+````
 
 ### Ingest Your Documents
 
@@ -264,15 +315,14 @@ curl -X POST http://localhost:8000/api/v1/ingest/documents \
 ### Verify
 
 ```bash
-curl -N -X POST http://localhost:8000/api/v1/chat/stream \
+curl -N -X POST http://localhost:8000/api/v2/chat/stream \
   -H "Content-Type: application/json" \
   -d '{
     "query": "How does authentication work?",
     "session_id": "demo",
-    "user_id": "demo-user",
-    "stream": true
+    "user_id": "demo-user"
   }'
-# Expect SSE chunks ending with data: {"type":"done", "metadata":{...}}
+# Expect typed SSE envelopes ending with data: {"type":"done", "data":{...}}
 ```
 
 ---

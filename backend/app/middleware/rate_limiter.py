@@ -235,3 +235,85 @@ class RateLimitExceeded(Exception):
         self.window_seconds = window_seconds
         self.reset_time = reset_time
         super().__init__(f"Rate limit exceeded: {limit} requests per {window_seconds}s")
+
+
+# ---------------------------------------------------------------------------
+# General API throttling middleware (repo-hardening: previously the
+# general_rate_limit setting existed but was never enforced anywhere).
+# ---------------------------------------------------------------------------
+
+# Paths that must never be throttled (probes, docs, CORS preflight targets).
+_RL_EXEMPT_PREFIXES = (
+    "/api/health", "/api/v1/health", "/api/docs", "/api/redoc",
+    "/api/openapi.json", "/favicon",
+)
+
+
+def _client_key(request) -> str:
+    """Rate-limit key: sub claim of the Bearer token when present (per-user),
+    else client IP (per-host). The JWT is NOT verified here — signature
+    verification happens in the auth dependency; for throttling purposes an
+    unverifiable sub simply buckets the caller consistently."""
+    try:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            import base64, json as _json
+            payload_b64 = auth.split(" ", 1)[1].split(".")[1]
+            payload_b64 += "=" * (-len(payload_b64) % 4)
+            sub = _json.loads(base64.urlsafe_b64decode(payload_b64)).get("sub")
+            if sub:
+                return f"user:{sub}"
+    except Exception:  # noqa: BLE001
+        pass
+    host = request.client.host if request.client else "unknown"
+    return f"ip:{host}"
+
+
+class GeneralRateLimitMiddleware:
+    """Pure-ASGI middleware enforcing settings.general_rate_limit on all
+    API routes (except exempt prefixes). Fails open on limiter errors."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        path = scope.get("path", "")
+        if not path.startswith("/api") or path.startswith(_RL_EXEMPT_PREFIXES):
+            return await self.app(scope, receive, send)
+        try:
+            from app.core.config import get_settings
+            settings = get_settings()
+            if not settings.rate_limit_enabled:
+                return await self.app(scope, receive, send)
+            from starlette.requests import Request
+            request = Request(scope)
+            limiter = get_rate_limiter(settings.redis_url)
+            allowed, stats = limiter.is_allowed(
+                key=f"general:{_client_key(request)}",
+                limit=settings.general_rate_limit,
+                window_seconds=settings.general_rate_limit_window,
+            )
+        except Exception as exc:  # noqa: BLE001  — fail open, never break traffic
+            logger.debug("[rate-limit] general limiter error (fail-open): %s", exc)
+            return await self.app(scope, receive, send)
+
+        if not allowed:
+            from starlette.responses import JSONResponse
+            response = JSONResponse(
+                status_code=429,
+                content={
+                    "error": "rate_limit_exceeded",
+                    "detail": f"Too many requests — limit {stats.get('limit')} "
+                              f"per {get_settings().general_rate_limit_window}s",
+                },
+                headers={
+                    "Retry-After": str(max(1, stats.get("reset", 0) - int(time.time()))),
+                    "X-RateLimit-Limit": str(stats.get("limit", 0)),
+                    "X-RateLimit-Remaining": str(stats.get("remaining", 0)),
+                    "X-RateLimit-Reset": str(stats.get("reset", 0)),
+                },
+            )
+            return await response(scope, receive, send)
+        return await self.app(scope, receive, send)

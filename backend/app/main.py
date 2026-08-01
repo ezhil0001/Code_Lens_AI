@@ -35,7 +35,7 @@ from app.middleware.exception_handler import (
     TokenRevocationExceptionHandler
 )
 
-# Import chat API — v1 compat + v2 LangGraph streaming endpoints
+# Import chat API — v2 LangGraph streaming endpoints
 try:
     from app.api import chat as chat_api
 except ImportError:
@@ -120,6 +120,18 @@ async def lifespan(app: FastAPI):
     
     logger.info("✓ Backend startup completed successfully")
 
+    # ── Langfuse observability ────────────────────────────────────────────
+    # Initialise the LLM-observability singleton once at startup. This is a
+    # no-op (safe) when LANGFUSE_ENABLED is false or credentials are missing.
+    try:
+        from app.observability.langfuse_client import init_langfuse
+        if init_langfuse():
+            logger.info("✓ Langfuse observability active")
+        else:
+            logger.info("ℹ️  Langfuse observability disabled (set LANGFUSE_ENABLED=true to enable)")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"⚠️  Langfuse init skipped: {e}")
+
     # Pre-warm the RAG pipeline so the first chat request is instant.
     # This loads ChromaDB, BM25 index, embedding model, and reranker model
     # once at startup rather than on the first HTTP request.
@@ -159,6 +171,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"psycopg pool close failed: {e}")
 
+    # Flush any buffered Langfuse traces before the process exits.
+    try:
+        from app.observability.langfuse_client import shutdown as langfuse_shutdown
+        langfuse_shutdown()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Langfuse shutdown failed: {e}")
+
     logger.info("✓ Backend shutdown completed\n")
 
 
@@ -184,6 +203,26 @@ app = FastAPI(
 # Add logging middleware (tracks all requests/responses)
 app.add_middleware(LoggingMiddleware)
 
+# General API rate limiting — enforces settings.general_rate_limit (per user
+# when a Bearer token is present, per IP otherwise). Previously this limit was
+# configured but never applied to any route. Fails open on limiter errors.
+try:
+    from app.middleware.rate_limiter import GeneralRateLimitMiddleware
+    app.add_middleware(GeneralRateLimitMiddleware)
+    logger.info("✓ General API rate limiting enabled")
+except Exception as _rl_err:  # noqa: BLE001
+    logger.warning(f"General rate limit middleware not installed: {_rl_err}")
+
+# Langfuse HTTP tracing — one root trace per non-chat request (chat requests
+# are traced by the LangGraph callback handler; wrapping them again would
+# create duplicate root traces). Pure pass-through when Langfuse is disabled.
+try:
+    from app.middleware.langfuse_middleware import LangfuseHTTPMiddleware
+    app.add_middleware(LangfuseHTTPMiddleware)
+except Exception as _lf_mw_err:  # noqa: BLE001
+    logger.warning(f"Langfuse HTTP middleware not installed: {_lf_mw_err}")
+
+
 # ==================== CORS Middleware ====================
 
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:4200").split(",")
@@ -195,7 +234,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["content-type"],
+    expose_headers=["content-type", "X-Trace-Id", "X-Session-Id", "X-Thread-Id"],
     max_age=600,
 )
 
@@ -251,23 +290,31 @@ app.include_router(auth.router)
 
 # Include document ingestion routes
 app.include_router(ingest.router)
+
+# H-3: dependency-probing health endpoints (detailed/components/system)
+try:
+    from app.api import health as health_api
+    app.include_router(health_api.router)
+    logger.info("✓ Detailed health endpoints registered (/api/v1/health/detailed)")
+except Exception as _h_err:  # noqa: BLE001
+    logger.warning("Detailed health endpoints not registered: %s", _h_err)
+
 logger.info("✓ Document Ingestion routes registered:")
 logger.info("  - POST   /api/v1/ingest/documents")
 logger.info("  - POST   /api/v1/ingest/url")
 logger.info("  - GET    /api/v1/ingest/status")
 logger.info("  - DELETE /api/v1/ingest/clear")
 
-# Unified Chat API — registers both /api/v2/chat/stream (primary) and
-# /api/v1/chat/stream (compat shim) from a single module.
+# Chat API — V2-only LangGraph streaming + supporting endpoints.
 if chat_api:
     app.include_router(chat_api.router_v2)
-    app.include_router(chat_api.router_v1)
     logger.info("✓ Chat API registered:")
-    logger.info("  - POST   /api/v2/chat/stream (LangGraph SSE, primary)")
-    logger.info("  - POST   /api/v1/chat/stream (v1 compat shim)")
-    logger.info("  - GET    /api/v1/chat/cache/status")
-    logger.info("  - POST   /api/v1/chat/cache/clear")
-    logger.info("  - GET    /api/v1/chat/history/{session_id}")
+    logger.info("  - POST   /api/v2/chat/stream (LangGraph SSE)")
+    logger.info("  - GET    /api/v2/chat/cache/status")
+    logger.info("  - POST   /api/v2/chat/cache/clear")
+    logger.info("  - GET    /api/v2/chat/history/{session_id}")
+    logger.info("  - POST   /api/v2/chat/feedback")
+    logger.info("  - POST   /api/v2/chat/curate")
 
 try:
     from app.api import checkpoints as checkpoints_api
