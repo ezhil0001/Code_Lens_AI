@@ -122,7 +122,13 @@ _graph_lock = None
 
 
 def _build_graph():
-    """Return the compiled supervisor graph singleton, or None on failure."""
+    """Return the compiled supervisor graph singleton, or None on failure.
+
+    Sync entry point (used by non-async callers). Prefer ``_build_graph_async``
+    from async request handlers so the Postgres checkpointer can be awaited —
+    the sync path can only obtain a MemorySaver when an event loop is already
+    running.
+    """
     global _graph_singleton, _graph_lock
     import threading
     if _graph_lock is None:
@@ -139,6 +145,34 @@ def _build_graph():
             logger.info("[chat] supervisor graph compiled and cached")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[chat] supervisor graph unavailable: %s", exc)
+    return _graph_singleton
+
+
+async def _build_graph_async():
+    """Async graph builder — awaits the real AsyncPostgresSaver checkpointer.
+
+    This is the correct path for the streaming endpoint: the graph is driven by
+    ``astream_events`` (async), so it needs an async checkpointer. Building it
+    here (instead of via ``get_checkpointer_sync``) is what makes Postgres-
+    backed checkpoints / history / branch / replay actually persist rather than
+    silently falling back to an ephemeral in-memory saver.
+    """
+    global _graph_singleton, _graph_lock
+    import threading
+    if _graph_lock is None:
+        _graph_lock = threading.Lock()
+    if _graph_singleton is not None:
+        return _graph_singleton
+    try:
+        from app.graph.checkpointing.pg_checkpointer import get_checkpointer
+        from app.graph.supervisor_graph import build_supervisor_graph
+        checkpointer = await get_checkpointer()
+        with _graph_lock:
+            if _graph_singleton is None:
+                _graph_singleton = build_supervisor_graph(checkpointer=checkpointer)
+                logger.info("[chat] supervisor graph compiled and cached (async checkpointer)")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[chat] supervisor graph unavailable: %s", exc)
     return _graph_singleton
 
 
@@ -390,7 +424,7 @@ async def chat_stream_v2(
         )
 
     # 4. Graph
-    graph = _build_graph()
+    graph = await _build_graph_async()
     if graph is None:
         return StreamingResponse(
             _fatal_error_stream("Supervisor graph is currently unavailable. Please try again."),

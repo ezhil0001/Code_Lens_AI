@@ -90,6 +90,41 @@ def _merge_dicts(existing: dict, update: dict) -> dict:
     return {**existing, **update}
 
 
+def _merge_chunk_lists(existing: list, update: list) -> list:
+    """Concat-dedup reducer for lists of retrieval chunks / sources / scores.
+
+    When the supervisor dispatches multiple agents in parallel (CodeAgent +
+    DebugAgent via ``Send()``), each branch writes ``retrieved_chunks``,
+    ``reranked_chunks``, ``rerank_scores`` and ``sources`` in the SAME
+    superstep. Without a reducer LangGraph raises
+    ``INVALID_CONCURRENT_GRAPH_UPDATE`` ("Can receive only one value per
+    step"). This reducer concatenates every branch's contribution and drops
+    exact duplicates (chunks are unhashable dicts, so we dedup by a stable
+    content key) while preserving first-occurrence order.
+    """
+    existing = existing or []
+    update = update or []
+    merged: list = []
+    seen: set = set()
+
+    def _key(item: Any) -> str:
+        if isinstance(item, dict):
+            # Prefer stable identity fields; fall back to full repr.
+            for k in ("id", "chunk_id", "source", "content"):
+                if k in item and item[k] is not None:
+                    return f"{k}:{item[k]}"
+            return repr(sorted(item.items(), key=lambda kv: str(kv[0])))
+        return repr(item)
+
+    for item in list(existing) + list(update):
+        key = _key(item)
+        if key not in seen:
+            merged.append(item)
+            seen.add(key)
+    return merged
+
+
+
 class AgentState(dict):
     """
     Central state TypedDict for the LangGraph Supervisor graph.
@@ -131,9 +166,12 @@ class AgentState(dict):
     metadata_filter: Optional[Dict[str, Any]]  # ChromaDB where= clause
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
-    retrieved_chunks: List[Dict[str, Any]]
-    reranked_chunks: List[Dict[str, Any]]
-    rerank_scores: List[float]           # cross-encoder scores for reranked_chunks
+    # Concat-dedup reducers: parallel agents (Code/Debug/Doc/Arch) each write
+    # these in the same superstep, so a reducer is REQUIRED to avoid
+    # INVALID_CONCURRENT_GRAPH_UPDATE.
+    retrieved_chunks: Annotated[List[Dict[str, Any]], _merge_chunk_lists]
+    reranked_chunks: Annotated[List[Dict[str, Any]], _merge_chunk_lists]
+    rerank_scores: Annotated[List[float], _merge_chunk_lists]  # cross-encoder scores for reranked_chunks
     parent_contexts: Dict[str, str]
 
     # ── Agent outputs ─────────────────────────────────────────────────────────
@@ -163,7 +201,8 @@ class AgentState(dict):
 
     # ── Final response ────────────────────────────────────────────────────────
     final_response: Optional[str]
-    sources: List[Dict[str, Any]]
+    # Concat-dedup: parallel agents each append their retrieval sources.
+    sources: Annotated[List[Dict[str, Any]], _merge_chunk_lists]
     cache_hit: bool
     evaluation_queued: bool
 

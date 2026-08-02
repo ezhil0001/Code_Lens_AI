@@ -47,7 +47,8 @@ async def doc_retrieve_node(state: dict, config: RunnableConfig = None) -> dict:
         from app.services.pipeline_factory import get_pipeline_factory_cached
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
-        _lock = getattr(retriever, "_metadata_lock", threading.Lock())
+        from app.core.database import get_retrieval_lock
+        _lock = get_retrieval_lock()
 
         def _do_retrieve():
             # H-1: sync retrieval + lock in a worker thread — never on the loop.

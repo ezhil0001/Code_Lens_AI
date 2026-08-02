@@ -141,9 +141,13 @@ async def code_retrieve_node(state: dict, config: RunnableConfig = None) -> dict
         retriever = factory.get_retriever_engine()
 
         # Swap the vector-leg embedder to the code-specialized singleton for this call.
-        # We do it inside _filter_lock so no concurrent request sees the half-swapped state.
+        # We do it inside the shared, process-wide retrieval lock so no concurrent
+        # agent (CodeAgent + DebugAgent dispatched in parallel) runs sentence-
+        # transformer inference at the same time — MPS is not thread-safe and
+        # concurrent inference deadlocks the whole request.
         hybrid = retriever.hybrid_retriever
-        _lock = hybrid._filter_lock
+        from app.core.database import get_retrieval_lock
+        _lock = get_retrieval_lock()
 
         try:
             from app.core.database import get_code_embedder

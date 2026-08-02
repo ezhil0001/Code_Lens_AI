@@ -25,24 +25,27 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # ── SQL constant (tested by C-010) ───────────────────────────────────────────
+# psycopg3 uses %s positional placeholders (NOT $1/$2 — that is libpq/asyncpg
+# syntax which psycopg parses as zero placeholders, raising
+# "the query has 0 placeholders but N parameters were passed").
 _RETRIEVE_QUERY: str = (
     "SELECT content FROM agent_long_term_memory "
-    "WHERE user_id = $1 "
-    "ORDER BY embedding <=> $2::vector "
-    "LIMIT $3"
+    "WHERE user_id = %s "
+    "ORDER BY embedding <=> %s::vector "
+    "LIMIT %s"
 )
 
 _INSERT_QUERY: str = """
 INSERT INTO agent_long_term_memory
     (user_id, org_id, content, entity_type, embedding, source_session)
-VALUES ($1, $2, $3, $4, $5::vector, $6)
+VALUES (%s, %s, %s, %s, %s::vector, %s)
 ON CONFLICT DO NOTHING
 """
 
 _UPDATE_ACCESS_QUERY: str = """
 UPDATE agent_long_term_memory
    SET last_accessed = NOW(), access_count = access_count + 1
- WHERE user_id = $1 AND content = $2
+ WHERE user_id = %s AND content = %s
 """
 
 

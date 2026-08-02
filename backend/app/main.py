@@ -171,6 +171,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"psycopg pool close failed: {e}")
 
+    # Close the dedicated async checkpointer pool (prevents connection leaks).
+    try:
+        from app.graph.checkpointing.pg_checkpointer import close_checkpointer
+        await close_checkpointer()
+    except Exception as e:
+        logger.warning(f"checkpointer pool close failed: {e}")
+
     # Flush any buffered Langfuse traces before the process exits.
     try:
         from app.observability.langfuse_client import shutdown as langfuse_shutdown

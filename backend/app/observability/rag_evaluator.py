@@ -396,8 +396,25 @@ class RAGEvaluator:
         
         # Setup LLM for evaluation
         self.evaluator_llm = self._setup_evaluator_llm()
-    
-    def _setup_evaluator_llm(self):
+        # RAGAS metrics like answer_relevancy need an embeddings model. Without
+        # one, RAGAS silently defaults to OpenAI embeddings and calls
+        # /openai/v1/... — which fails whenever OPENAI_API_KEY is a placeholder,
+        # forcing every evaluation onto the lexical fallback. Reuse the app's
+        # local HuggingFace embedder so evaluation is fully self-contained.
+        self.evaluator_embeddings = self._setup_evaluator_embeddings()
+
+    def _setup_evaluator_embeddings(self):
+        """Local embeddings for RAGAS so it never reaches out to OpenAI."""
+        try:
+            from app.core.database import get_embedder
+            emb = get_embedder()
+            if emb is not None:
+                logger.info("✓ RAGAS embeddings: local HuggingFace singleton")
+                return emb
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"RAGAS local embeddings unavailable: {e}")
+        return None
+
         provider = os.getenv("EVAL_LLM_PROVIDER", "groq").lower()
 
         if provider == "ollama":
@@ -479,11 +496,14 @@ class RAGEvaluator:
             dataset = Dataset.from_dict(dataset_dict)
             
             # Run evaluation
-            result = evaluate(
-                dataset,
-                metrics=[faithfulness, context_recall, answer_relevancy],
-                llm=self.evaluator_llm,
-            )
+            _eval_kwargs = {
+                "metrics": [faithfulness, context_recall, answer_relevancy],
+                "llm": self.evaluator_llm,
+            }
+            # Pin local embeddings so answer_relevancy never calls OpenAI.
+            if getattr(self, "evaluator_embeddings", None) is not None:
+                _eval_kwargs["embeddings"] = self.evaluator_embeddings
+            result = evaluate(dataset, **_eval_kwargs)
             
             eval_time_ms = (time.time() - start_time) * 1000
             

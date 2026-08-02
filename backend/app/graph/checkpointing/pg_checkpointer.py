@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 _saver = None
 _saver_lock = threading.Lock()
 _setup_done = False
+_async_pool = None  # dedicated AsyncConnectionPool for the checkpointer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -105,7 +107,7 @@ async def get_checkpointer():
     Returns:
         A LangGraph checkpoint saver object.  Always non-None.
     """
-    global _saver, _setup_done
+    global _saver, _setup_done, _async_pool
 
     if _saver is not None:
         return _saver
@@ -115,26 +117,35 @@ async def get_checkpointer():
             return _saver
 
         # ── Try AsyncPostgresSaver (production path) ──────────────────────────
+        # LangGraph's AsyncPostgresSaver requires an *async* psycopg connection
+        # or AsyncConnectionPool — the shared psycopg_pool.ConnectionPool is
+        # SYNC and passing it raises "Invalid connection type: ConnectionPool".
+        # We therefore open a small dedicated AsyncConnectionPool here. Because
+        # the graph is later driven by astream_events (async), an async saver is
+        # mandatory; the previous sync-pool path silently fell back to an
+        # ephemeral MemorySaver, so Postgres checkpointing never actually ran.
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore
-            from app.core.database import get_pg_pool
+            from psycopg_pool import AsyncConnectionPool  # type: ignore
+            from app.core.database import build_psycopg_dsn
 
-            pool = get_pg_pool()
-            # AsyncPostgresSaver expects an asyncpg pool; our pool is psycopg.
-            # LangGraph 1.x also ships a sync PostgresSaver — try async first,
-            # then fall back to the sync variant wrapped in a thread executor.
-            saver = AsyncPostgresSaver(pool)  # type: ignore[arg-type]
+            dsn = build_psycopg_dsn()
+            # autocommit + no prepared statements is what LangGraph documents
+            # for its Postgres savers.
+            _async_pool = AsyncConnectionPool(
+                conninfo=dsn,
+                max_size=int(os.getenv("CHECKPOINTER_POOL_MAX", "4")),
+                open=False,
+                kwargs={"autocommit": True, "prepare_threshold": 0},
+            )
+            await _async_pool.open(wait=True, timeout=10.0)
+
+            saver = AsyncPostgresSaver(_async_pool)  # type: ignore[arg-type]
 
             if not _setup_done:
-                try:
-                    await saver.setup()
-                    _setup_done = True
-                    logger.info("[checkpointer] AsyncPostgresSaver setup complete")
-                except Exception as setup_err:  # noqa: BLE001
-                    logger.warning(
-                        "[checkpointer] AsyncPostgresSaver.setup() failed: %s — "
-                        "checkpoints table may not exist yet", setup_err
-                    )
+                await saver.setup()  # idempotent — creates checkpoints tables
+                _setup_done = True
+                logger.info("[checkpointer] AsyncPostgresSaver setup complete")
 
             _saver = saver
             logger.info("[checkpointer] Using AsyncPostgresSaver ✓")
@@ -145,6 +156,13 @@ async def get_checkpointer():
                 "[checkpointer] AsyncPostgresSaver unavailable (%s) — "
                 "falling back to MemorySaver", exc
             )
+            # Tear down a half-open pool so we don't leak connections.
+            if _async_pool is not None:
+                try:
+                    await _async_pool.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                _async_pool = None
 
         # ── MemorySaver fallback ──────────────────────────────────────────────
         from langgraph.checkpoint.memory import MemorySaver  # type: ignore
@@ -173,3 +191,23 @@ def get_checkpointer_sync():
             return loop.run_until_complete(get_checkpointer())
         finally:
             loop.close()
+
+
+async def close_checkpointer() -> None:
+    """Close the dedicated async checkpointer pool on application shutdown.
+
+    Prevents connection leaks (the AsyncConnectionPool holds live Postgres
+    sockets). Safe to call when no pool was ever opened.
+    """
+    global _async_pool, _saver, _setup_done
+    if _async_pool is not None:
+        try:
+            await _async_pool.close()
+            logger.info("[checkpointer] async pool closed")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[checkpointer] async pool close failed: %s", exc)
+        finally:
+            _async_pool = None
+            _saver = None
+            _setup_done = False
+

@@ -40,14 +40,31 @@ def build_psycopg_dsn() -> str:
     """
     from urllib.parse import quote_plus
 
+    # Pydantic Settings loads values from `.env` into the Settings object, NOT
+    # into os.environ. Relying on os.getenv() alone therefore silently falls
+    # through to defaults (postgres:postgres) whenever the app is launched
+    # without those vars exported into the shell — which disables the semantic
+    # cache with an auth failure. Fall back to Settings so the DSN always
+    # matches the SQLAlchemy engine's credentials.
+    def _cfg(env_key: str, attr: str, default: Optional[str] = None) -> Optional[str]:
+        val = os.getenv(env_key)
+        if val:
+            return val
+        try:
+            from app.core.config import get_settings
+
+            return getattr(get_settings(), attr, default)
+        except Exception:  # noqa: BLE001
+            return default
+
     # 1. Prefer individual vars — encode password to handle special chars
-    host = os.getenv("POSTGRES_HOST")
-    port = os.getenv("POSTGRES_PORT", "5432")
-    user = os.getenv("POSTGRES_USER")
-    password = os.getenv("POSTGRES_PASSWORD")
-    db = os.getenv("POSTGRES_DB")
+    host = _cfg("POSTGRES_HOST", "postgres_host")
+    port = str(_cfg("POSTGRES_PORT", "postgres_port", "5432"))
+    user = _cfg("POSTGRES_USER", "postgres_user")
+    password = _cfg("POSTGRES_PASSWORD", "postgres_password")
+    db = _cfg("POSTGRES_DB", "postgres_db")
     if host and user and password and db:
-        return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
+        return f"postgresql://{quote_plus(str(user))}:{quote_plus(str(password))}@{host}:{port}/{db}"
 
     # 2. Explicit DSN override
     dsn = os.getenv("POSTGRES_DSN")
@@ -55,7 +72,7 @@ def build_psycopg_dsn() -> str:
         return dsn
 
     # 3. DATABASE_URL — strip SQLAlchemy driver prefixes
-    url = os.getenv("DATABASE_URL")
+    url = os.getenv("DATABASE_URL") or _cfg("DATABASE_URL", "database_url")
     if url:
         return (
             url.replace("postgresql+psycopg2://", "postgresql://")
@@ -70,6 +87,26 @@ def build_psycopg_dsn() -> str:
 # --------------------------------------------------------------------------- #
 _pool_lock = threading.Lock()
 _pool = None  # type: ignore
+
+
+# --------------------------------------------------------------------------- #
+# Process-wide retrieval lock                                                 #
+# --------------------------------------------------------------------------- #
+# Sentence-transformer inference on Apple MPS (and, more generally, a single
+# shared embedding/reranker model) is NOT thread-safe. When the supervisor
+# dispatches multiple agents in parallel (e.g. CodeAgent + DebugAgent via
+# Send()), each agent's retrieve node runs in its own worker thread and would
+# otherwise call the same model concurrently — which deadlocks the MPS backend
+# and hangs the whole request. Every agent MUST serialise its retrieval through
+# this single, process-wide lock. Previously each node fell back to a throwaway
+# ``threading.Lock()`` when the retriever lacked a lock attribute, providing no
+# mutual exclusion at all.
+_RETRIEVAL_LOCK = threading.RLock()
+
+
+def get_retrieval_lock() -> "threading.RLock":
+    """Return the shared, process-wide lock guarding model-backed retrieval."""
+    return _RETRIEVAL_LOCK
 
 
 def get_pg_pool():

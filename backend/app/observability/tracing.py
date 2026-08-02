@@ -82,7 +82,18 @@ def request_trace(trace_id: Optional[str]) -> Iterator[None]:
     try:
         yield
     finally:
-        _REQUEST_TRACE.reset(token)
+        # A ``ContextVar`` token can only be reset in the same context it was
+        # created in. Streaming responses (SSE) drive their async generator to
+        # completion in a *different* context than the one that entered this
+        # manager, so ``reset(token)`` raises
+        # ``ValueError: Token was created in a different Context``. That error
+        # must never surface — it would abort the stream and orphan the trace.
+        # Fall back to clearing the var directly when the token is unusable.
+        try:
+            _REQUEST_TRACE.reset(token)
+        except ValueError:
+            _REQUEST_TRACE.set(_UNSET)
+
 
 
 def current_request_trace_id() -> Optional[str]:

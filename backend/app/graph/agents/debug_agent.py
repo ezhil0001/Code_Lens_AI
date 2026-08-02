@@ -85,7 +85,8 @@ async def debug_retrieve_node(state: dict, config: RunnableConfig = None) -> dic
         from app.services.pipeline_factory import get_pipeline_factory_cached
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
-        _lock = getattr(retriever, "_metadata_lock", threading.Lock())
+        from app.core.database import get_retrieval_lock
+        _lock = get_retrieval_lock()
 
         def _do_retrieve():
             # H-1: sync retrieval + lock in a worker thread — never on the loop.
@@ -118,7 +119,8 @@ async def debug_pattern_node(state: dict, config: RunnableConfig = None) -> dict
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
         import threading
-        _lock = getattr(retriever, "_metadata_lock", threading.Lock())
+        from app.core.database import get_retrieval_lock
+        _lock = get_retrieval_lock()
 
         def _do_pattern_retrieve():
             with _lock:
@@ -166,7 +168,8 @@ async def debug_dependency_node(state: dict, config: RunnableConfig = None) -> d
             import threading
             factory = get_pipeline_factory_cached()
             retriever = factory.get_retriever_engine()
-            _lock = getattr(retriever, "_metadata_lock", threading.Lock())
+            from app.core.database import get_retrieval_lock
+            _lock = get_retrieval_lock()
             # Search for code that calls or imports the target function
             caller_query = f"calls {target_func} OR imports {target_func} OR {target_func}("
 

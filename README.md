@@ -88,7 +88,7 @@ CodeLens AI solves all three. It retrieves the *right* 200 lines per question �
 
 **ChromaDB** holds the code and documentation corpus. The `where=` metadata filter is the only way routing decisions become real data constraints — `CODEBASE_ONLY → where={'file_type':'code'}`. ChromaDB persists locally, embeds with the same model used during ingestion, and stays out of the way.
 
-**pgvector** powers the semantic cache. The cache requires multi-tenant isolation (`WHERE user_id = ...`) before the cosine search runs, and a B-tree + IVFFlat index combo. PostgreSQL's query planner does this for free. Chroma cannot filter and rank in a single query the way SQL can.
+**pgvector** powers the semantic cache. The cache requires multi-tenant isolation (`WHERE user_id = ...`) before the cosine search runs, and a B-tree + HNSW index combo (HNSW avoids the empty-table startup issue IVFFlat has). PostgreSQL's query planner does this for free. Chroma cannot filter and rank in a single query the way SQL can.
 
 > Vector stores are not interchangeable. The right choice depends on query pattern, not hype.
 
@@ -104,7 +104,7 @@ Naïve character-level splitting severs function bodies mid-implementation. Code
 
 ## Production Hardening
 
-Five engineering hours of paranoia — "what happens if 50 users hit this simultaneously?" — surfaced four bugs after the system was otherwise complete.
+Five engineering hours of paranoia — "what happens if 50 users hit this simultaneously?" — surfaced four bugs after the system was otherwise complete. A later live end-to-end validation against running services surfaced seven more (see Challenge 5).
 
 ### Challenge 1 — Context Overflow
 
@@ -154,6 +154,28 @@ namespaced_session = f"{request.user_id}::{request.session_id}"
 
 A guessed session ID is now cryptographically useless without the matching `user_id`.
 
+### Challenge 5 — Live End-to-End Hardening (Backend → Langfuse)
+
+A full live validation against running services (backend + Angular + self-hosted
+Langfuse) surfaced a further seven silent, production-critical defects — each was
+independently reproduced, root-caused against official docs, fixed with the
+smallest safe change, and pinned by a regression test (suite `R-001…R-007`).
+
+| # | Bug | Root Cause | Fix |
+|---|---|---|---|
+| 1 | Semantic cache disabled every boot | `.env` is loaded by Pydantic Settings, not `os.environ`; the psycopg DSN builder read only `os.getenv`, falling through to the `postgres:postgres` default → auth failure | `build_psycopg_dsn()` falls back to `Settings` |
+| 2 | Every multi-agent query hung | Parallel agents each built a throwaway `threading.Lock()`, giving zero mutual exclusion → concurrent SentenceTransformer inference on Apple MPS deadlocked | One process-wide `get_retrieval_lock()` shared by all agents |
+| 3 | Parallel dispatch crashed | `sources` / `retrieved_chunks` / `reranked_chunks` / `rerank_scores` had no reducer → LangGraph `INVALID_CONCURRENT_GRAPH_UPDATE` | `_merge_chunk_lists` concat-dedup reducer via `Annotated[...]` |
+| 4 | Streaming trace aborted | `ContextVar.reset()` ran in a different context than `.set()` inside the SSE generator → `ValueError: Token created in a different Context` | Defensive reset fallback in `request_trace()` |
+| 5 | Long-term memory always failed | psycopg3 SQL used libpq `$1` placeholders instead of `%s` | Switched all LTM SQL to `%s` positional params |
+| 6 | RAGAS silently used the lexical fallback | `evaluate()` was given no `embeddings`, so RAGAS defaulted to OpenAI with a placeholder key | Inject the local HuggingFace embedder into RAGAS |
+| 7 | Postgres checkpointing never active | `AsyncPostgresSaver` was handed the **sync** `ConnectionPool`, and the sync builder always returned `MemorySaver` under a running loop → history/branch/replay used ephemeral storage | Dedicated `AsyncConnectionPool` + async graph-build path + `close_checkpointer()` shutdown hook |
+
+Validated live: a real Angular-origin request streams 400–900 tokens with zero
+errors, persists checkpoints to Postgres, exports a single clean Langfuse trace
+(observations, generation with token/cost/latency, 7 online + 2 feedback
+scores), degrades gracefully when Langfuse is stopped, and auto-recovers.
+
 ---
 
 ## Security Model
@@ -161,7 +183,7 @@ A guessed session ID is now cryptographically useless without the matching `user
 | Layer | Threat | Defense |
 |---|---|---|
 | **Memory** | Session poisoning via guessed `session_id` | `user_id::session_id` namespace — session ID alone is useless |
-| **Retrieval** | Race on shared `metadata_filter` | `threading.Lock()` around mutate-retrieve-restore |
+| **Retrieval** | Race on shared `metadata_filter`; concurrent model inference | Process-wide `get_retrieval_lock()` serialises the mutate-retrieve-restore sequence across all parallel agents |
 | **Vector DB** | Cross-tenant document access | ChromaDB `where=` filter scoped to `file_type` and collection |
 | **Cache** | Cross-user cache poisoning | pgvector query runs `WHERE user_id = ?` before cosine ANN search |
 | **Prompt** | Prompt injection via malicious query | Anti-hallucination system prompt; explicit boundary markers in context blocks |
@@ -173,14 +195,14 @@ A guessed session ID is now cryptographically useless without the matching `user
 | Layer | Technology | Why |
 |---|---|---|
 | **API** | FastAPI + SSE | Async-native, streaming-first, typed with Pydantic |
-| **Frontend** | Angular 17 | Standalone components, reactive forms, ngx-markdown |
-| **Orchestration** | LangChain (idiomatic) | `EnsembleRetriever`, `PostgresChatMessageHistory`, `PydanticOutputParser` — primitives used, not fought |
+| **Frontend** | Angular 19 | Standalone components, reactive forms, ngx-markdown |
+| **Orchestration** | LangChain + LangGraph | `EnsembleRetriever`, `PostgresChatMessageHistory`, supervisor graph with parallel `Send()` dispatch + `AsyncPostgresSaver` checkpointing |
 | **Code vector store** | ChromaDB | `where=` metadata filter turns routing into a data constraint |
-| **Semantic cache** | PostgreSQL + pgvector | Multi-tenant `WHERE` + IVFFlat index; SQL planner beats a dedicated vector DB for this pattern |
-| **Embedding model** | `all-mpnet-base-v2` (768d) | Consistent model across ingestion and retrieval — vector drift is impossible |
+| **Semantic cache** | PostgreSQL + pgvector | Multi-tenant `WHERE` + HNSW index; SQL planner beats a dedicated vector DB for this pattern |
+| **Embedding model** | `all-MiniLM-L6-v2` (384d) general + `st-codesearch-distilroberta-base` for code | Same model across ingestion and retrieval per corpus — vector drift is impossible |
 | **Reranker** | `BAAI/bge-reranker-v2-m3` | Multilingual cross-encoder; ~30% precision improvement over bi-encoder retrieval alone |
 | **LLM** | Ollama (local) / Groq / OpenAI | Provider-agnostic thin client layer — swap via `.env` variable |
-| **Evaluation** | RAGAS + Langfuse | Faithfulness, context recall, answer relevancy scored asynchronously and streamed to Langfuse |
+| **Evaluation** | RAGAS + Langfuse | Faithfulness, context recall, answer relevancy scored asynchronously (local embeddings) and streamed to Langfuse |
 | **Observability** | Langfuse | LLM tracing, span-level latency, token/cost tracking, and online evaluation across retrieval → rerank → agent → generation paths |
 
 ---
@@ -192,10 +214,10 @@ A guessed session ID is now cryptographically useless without the matching `user
 | Requirement | Version | Notes |
 |---|---|---|
 | Python | 3.10 – 3.11 | LangChain + ChromaDB tested range |
-| Node.js | ≥ 18.x | Angular 17 |
-| PostgreSQL | ≥ 14 | Required for pgvector |
-| pgvector | ≥ 0.5.1 | Cosine index for semantic cache and memory |
-| RAM | ≥ 8 GB | Embedding model (500 MB) + reranker (2.3 GB) |
+| Node.js | ≥ 18.x | Angular 19 |
+| PostgreSQL | ≥ 14 | Required for pgvector, semantic cache & LangGraph checkpoints |
+| pgvector | ≥ 0.5.1 | Cosine/HNSW index for semantic cache and memory |
+| RAM | ≥ 8 GB | Embedding model + reranker (2.3 GB) |
 
 ### Setup
 
@@ -219,7 +241,7 @@ cp .env.example .env
 # Edit .env: set POSTGRES_*, LLM_PROVIDER, and optionally GROQ_API_KEY
 
 # 4. Start the backend
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 
 # 5. Install and start the frontend
 cd ../frontend
@@ -307,7 +329,7 @@ safe no-op and the application runs unchanged.
 
 ```bash
 # Via REST endpoint (after backend is running)
-curl -X POST http://localhost:8000/api/v1/ingest/documents \
+curl -X POST http://localhost:8001/api/v1/ingest/documents \
      -F "file=@./docs/architecture.pdf" \
      -F "file=@./src/"
 ```
@@ -315,7 +337,7 @@ curl -X POST http://localhost:8000/api/v1/ingest/documents \
 ### Verify
 
 ```bash
-curl -N -X POST http://localhost:8000/api/v2/chat/stream \
+curl -N -X POST http://localhost:8001/api/v2/chat/stream \
   -H "Content-Type: application/json" \
   -d '{
     "query": "How does authentication work?",

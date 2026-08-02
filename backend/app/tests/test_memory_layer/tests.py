@@ -247,15 +247,16 @@ async def _test_ltm_namespace_isolation() -> TestResult:
             "_RETRIEVE_QUERY constant not found in long_term_store.py",
             detail=(
                 "Add: _RETRIEVE_QUERY = 'SELECT content FROM agent_long_term_memory "
-                "WHERE user_id = $1 ORDER BY embedding <=> $2::vector LIMIT $3'"
+                "WHERE user_id = %s ORDER BY embedding <=> %s::vector LIMIT %s'"
             )
         )
     q: str = mod._RETRIEVE_QUERY
-    if "user_id" not in q or "$1" not in q:
+    # psycopg3 uses %s placeholders; the query must still scope by user_id.
+    if "user_id" not in q or "%s" not in q:
         return TestResult.failed(
             f"_RETRIEVE_QUERY does not scope by user_id: {q!r}"
         )
-    return TestResult.passed("_RETRIEVE_QUERY includes WHERE user_id = $1 ✓")
+    return TestResult.passed("_RETRIEVE_QUERY includes WHERE user_id = %s ✓")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
