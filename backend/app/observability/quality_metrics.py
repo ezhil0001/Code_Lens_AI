@@ -1,8 +1,7 @@
 """Quality metrics — RAGAS scores and LangGraph runtime signals.
 
 Observability for CodeLens_AI is provided by **Langfuse** (LLM tracing,
-span-level latency, token/cost tracking, and online evaluation) together
-with OpenTelemetry traces exported to Jaeger.
+span-level latency, token/cost tracking, and online evaluation).
 
 This module previously exported RAGAS scores and LangGraph runtime signals
 as in-process metrics. That path has been removed. The metric

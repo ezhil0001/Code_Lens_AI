@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -81,13 +82,34 @@ def _load_settings():
 import re as _re
 
 _MASK_PATTERNS: "list[tuple[_re.Pattern, str]]" = [
-    # JWTs (three base64url segments)
-    (_re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "[REDACTED_JWT]"),
+    # PEM private key blocks (whole body, multi-line).
+    (_re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        _re.DOTALL,
+    ), "[REDACTED_PRIVATE_KEY]"),
+    # Credentials embedded in connection URLs (postgres://user:pass@host/db,
+    # redis://:pass@host). The user part is optional — redis URLs omit it.
+    (_re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s:/@]*):([^\s/@]+)@"), r"\1[REDACTED_CREDENTIALS]@"),
+    # JWTs (three base64url segments). The signature segment is deliberately
+    # short-tolerant — a 3-char signature slipped through an 8-char minimum.
+    (_re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{2,}\b"), "[REDACTED_JWT]"),
+    # AWS access key ids (AKIA/ASIA/AGPA/AIDA/AROA/ANPA/ANVA/ABIA + 16 chars).
+    (_re.compile(r"\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|APKA|AROA)[A-Z0-9]{16}\b"), "[REDACTED_AWS_KEY_ID]"),
+    # GitHub fine-grained / app tokens (github_pat_, ghs_, ghr_).
+    (_re.compile(r"\b(?:github_pat_|ghs_|ghr_)[A-Za-z0-9_]{20,}\b"), "[REDACTED_KEY]"),
     # API keys / bearer tokens (common vendor prefixes)
     (_re.compile(r"\b(sk|pk|rk|gsk|ghp|gho|xox[bposa])[-_][A-Za-z0-9_-]{10,}\b"), "[REDACTED_KEY]"),
-    (_re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{16,}"), r"\1 [REDACTED_TOKEN]"),
-    # Explicit secret assignments: password=..., api_key: "...", secret=...
-    (_re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)\b(\s*[:=]\s*)(\"[^\"]+\"|'[^']+'|\S+)"), r"\1\2[REDACTED]"),
+    (_re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}"), r"\1 [REDACTED_TOKEN]"),
+    # Explicit secret assignments. The key part deliberately allows arbitrary
+    # prefixes/suffixes (aws_secret_access_key, x-api-token, refreshToken, …)
+    # because a \b-anchored bare word missed every underscore-joined name.
+    (_re.compile(
+        r"(?i)([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|api[_-]?key|apikey|token|credential|private[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)"
+        r"(\s*[:=]\s*)(\"[^\"]+\"|'[^']+'|\S+)"
+    ), r"\1\2[REDACTED]"),
+    # AWS secret access keys are 40-char base64-ish blobs with no prefix; only
+    # redact when they look like one AND are not ordinary prose.
+    (_re.compile(r"(?<![A-Za-z0-9+/=])(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{38,42}={0,2}(?![A-Za-z0-9+/=])"), "[REDACTED_SECRET]"),
     # Email addresses
     (_re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
     # Phone numbers (international-ish, 9+ digits with separators)
@@ -104,20 +126,30 @@ def _mask_text(text: str) -> str:
 def mask_sensitive_data(*, data: Any, **_: Any) -> Any:
     """Official Langfuse ``mask`` hook — redact PII/secrets recursively.
 
-    Handles strings, dicts, lists/tuples; leaves other types untouched.
+    Handles strings, mappings and sequences structurally. Anything else (a
+    LangChain ``Send``, a pydantic model, a dataclass, …) is checked through
+    its serialized form: the SDK serializes those objects *after* masking, so
+    a type-based pass-through leaked their contents verbatim. The original
+    object is preserved when it holds nothing sensitive, so trace payloads stay
+    fully structured in the UI.
+
     Fails open on the SAFE side: masking errors return a redaction marker,
-    never the raw payload. Signature matches the SDK contract
-    (keyword ``data``).
+    never the raw payload. Signature matches the SDK contract (keyword
+    ``data``).
     """
     try:
         if isinstance(data, str):
             return _mask_text(data)
         if isinstance(data, dict):
             return {k: mask_sensitive_data(data=v) for k, v in data.items()}
-        if isinstance(data, (list, tuple)):
+        if isinstance(data, (list, tuple, set)):
             masked = [mask_sensitive_data(data=v) for v in data]
-            return type(data)(masked) if isinstance(data, tuple) else masked
-        return data
+            return type(data)(masked) if not isinstance(data, list) else masked
+        if data is None or isinstance(data, (bool, int, float)):
+            return data
+        rendered = repr(data)
+        cleaned = _mask_text(rendered)
+        return cleaned if cleaned != rendered else data
     except Exception:  # noqa: BLE001
         return "[MASKING_ERROR]"
 
@@ -150,8 +182,20 @@ def _resolve_config() -> Dict[str, Any]:
     }
 
 
+def _allow_degraded() -> bool:
+    """True when the operator has explicitly opted into running untraced."""
+    return str(os.getenv("LANGFUSE_ALLOW_DEGRADED", "")).lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def init_langfuse() -> bool:
-    """Initialise the Langfuse singleton. Idempotent and never raises.
+    """Initialise the Langfuse singleton. Idempotent.
+
+    Raises ``RuntimeError`` when ``LANGFUSE_ENABLED=true`` but tracing cannot
+    actually work (package missing / no credentials), so a misconfigured
+    runtime fails at startup instead of silently emitting nothing. Set
+    ``LANGFUSE_ALLOW_DEGRADED=true`` to downgrade that to an error log.
 
     Returns
     -------
@@ -179,19 +223,28 @@ def init_langfuse() -> bool:
             return False
 
         if not HAS_LANGFUSE:
-            logger.warning(
-                "[langfuse] LANGFUSE_ENABLED=true but the 'langfuse' package is not "
-                "installed. Run: pip install langfuse. Continuing without tracing."
+            msg = (
+                "LANGFUSE_ENABLED=true but the 'langfuse' package is not importable "
+                f"in this interpreter ({sys.executable}). This is almost always the "
+                "wrong virtualenv — observability would silently produce zero traces. "
+                "Install it (pip install langfuse) or set LANGFUSE_ALLOW_DEGRADED=true "
+                "to start anyway."
             )
+            if not _allow_degraded():
+                raise RuntimeError(f"[langfuse] {msg}")
+            logger.error("[langfuse] %s", msg)
             _enabled = False
             return False
 
         if not cfg["public_key"] or not cfg["secret_key"]:
-            logger.warning(
-                "[langfuse] enabled but LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are "
-                "missing. Create a project in the Langfuse UI and copy its keys. "
-                "Continuing without tracing."
+            msg = (
+                "LANGFUSE_ENABLED=true but LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY "
+                "are missing. Create a project in the Langfuse UI and copy its keys, "
+                "or set LANGFUSE_ALLOW_DEGRADED=true to start anyway."
             )
+            if not _allow_degraded():
+                raise RuntimeError(f"[langfuse] {msg}")
+            logger.error("[langfuse] %s", msg)
             _enabled = False
             return False
 
@@ -291,6 +344,7 @@ def create_trace_id(seed: Optional[str] = None) -> Optional[str]:
 def get_callback_handler(
     *,
     trace_id: Optional[str] = None,
+    parent_span_id: Optional[str] = None,
 ) -> Optional[Any]:
     """Build a per-request LangChain ``CallbackHandler`` for the graph.
 
@@ -300,6 +354,9 @@ def get_callback_handler(
 
     ``trace_id`` pins the root run to a known trace id (via the SDK's
     ``trace_context``) so evaluation scoring can target the exact same trace.
+    ``parent_span_id`` additionally nests the whole LangGraph tree under an
+    existing observation — without it the graph run becomes a *second* root
+    observation alongside the request's root span.
     Trace-level session/user/tags/name are bound separately through
     :func:`build_trace_metadata` merged into ``config["metadata"]``.
 
@@ -322,8 +379,11 @@ def get_callback_handler(
             from langfuse.callback import CallbackHandler  # type: ignore
 
         if trace_id:
+            ctx: Dict[str, Any] = {"trace_id": trace_id}
+            if parent_span_id:
+                ctx["parent_span_id"] = parent_span_id
             try:
-                return CallbackHandler(trace_context={"trace_id": trace_id})
+                return CallbackHandler(trace_context=ctx)  # type: ignore[arg-type]
             except TypeError:
                 # Legacy handler without trace_context kwarg.
                 return CallbackHandler()
@@ -385,16 +445,23 @@ def score_current_trace(
     comment: Optional[str] = None,
     data_type: str = "NUMERIC",
 ) -> None:
-    """Attach an evaluation score to an existing trace. Never raises."""
+    """Attach an evaluation score to an existing trace. Never raises.
+
+    Uses a deterministic ``score_id`` derived from (trace_id, name) so a retried
+    or replayed evaluation upserts instead of appending a duplicate score.
+    """
     client = get_client()
     if client is None:
         return
     try:
+        import hashlib
+        score_id = hashlib.sha256(f"{trace_id}::{name}".encode()).hexdigest()[:32]
         # OTEL-based SDK (v3/v4): create_score(); older SDKs: score()
         if hasattr(client, "create_score"):
             client.create_score(
                 trace_id=trace_id, name=name, value=value,
-                comment=comment, data_type=data_type,
+                comment=comment, data_type=data_type,  # type: ignore[arg-type]
+                score_id=score_id,
             )
         else:  # pragma: no cover - legacy fallback
             client.score(trace_id=trace_id, name=name, value=value, comment=comment)

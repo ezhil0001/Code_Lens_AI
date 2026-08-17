@@ -11,6 +11,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, status, Backgrou
 from typing import List, Dict, Optional
 import ipaddress
 import logging
+import os
 import socket
 from pathlib import Path
 from datetime import datetime
@@ -122,18 +123,21 @@ def validate_ingest_url(url: str) -> str:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="URL has no hostname",
         )
-    # Literal IP fast path
+    # Literal IP fast path. _is_forbidden_ip() rejects anything unparseable,
+    # which is right for a resolved address but wrong for a hostname — calling
+    # it with "example.com" returned True and rejected every domain before DNS
+    # was ever consulted, so URL ingestion accepted nothing at all.
     try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass  # hostname, not an IP literal → resolve via DNS below
+    else:
         if _is_forbidden_ip(host):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="URL resolves to a forbidden (internal/private) address",
             )
-        # host was a valid, public literal IP
-        ipaddress.ip_address(host)
         return url
-    except ValueError:
-        pass  # hostname, not an IP literal → resolve via DNS
     try:
         infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
@@ -420,10 +424,54 @@ async def ingest_url(
         logger.info("=" * 100)
         
         try:
+            # The pipeline only understands file_system/codebase/documents —
+            # "web_url" fell through to "Unknown source_type" and indexed
+            # nothing. Fetch the URL to a temp file and reuse the same path
+            # uploads take.
+            import tempfile
+            from urllib.parse import unquote
+
+            import requests as _requests
+
+            resp = _requests.get(
+                ingest_url,
+                timeout=float(os.getenv("URL_INGEST_TIMEOUT", "30")),
+                stream=True,
+                headers={"User-Agent": "CodeLens-AI/1.0"},
+            )
+            resp.raise_for_status()
+
+            max_bytes = int(os.getenv("URL_INGEST_MAX_BYTES", str(20 * 1024 * 1024)))
+            body = b""
+            for chunk in resp.iter_content(64 * 1024):
+                body += chunk
+                if len(body) > max_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"URL content exceeds {max_bytes} bytes",
+                    )
+
+            name = os.path.basename(unquote(urlparse(ingest_url).path)) or "download"
+            if "." not in name:
+                ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
+                name += {
+                    "text/html": ".html",
+                    "text/plain": ".txt",
+                    "text/markdown": ".md",
+                    "application/pdf": ".pdf",
+                    "application/json": ".json",
+                }.get(ctype, ".txt")
+
+            tmp_dir = tempfile.mkdtemp(prefix="codelens_url_")
+            tmp_path = os.path.join(tmp_dir, name)
+            with open(tmp_path, "wb") as fh:
+                fh.write(body)
+            logger.info("[INGEST] fetched %s bytes from URL -> %s", len(body), tmp_path)
+
             # Delegate to service layer
             result = pipeline.ingest(
-                source_paths=[ingest_url],
-                source_type="web_url",
+                source_paths=[tmp_path],
+                source_type="file_system",
                 enrichment_enabled=True,
             )
             
@@ -452,12 +500,30 @@ async def ingest_url(
         background_tasks.add_task(_rebuild_bm25_url)
         logger.info("[BM25_REBUILD] BM25 index rebuild scheduled (URL ingest)")
 
+        status_value = result.get("status", "success")
+        chunks = result.get("chunks_created", 0) or 0
+        # The pipeline reported status/chunk counts that the response ignored,
+        # so a run that stored nothing still returned 200 "Successfully
+        # ingested URL". Fail loudly instead of reporting a false success.
+        if status_value != "success" or chunks == 0:
+            detail = result.get("error") or result.get("message") or (
+                "URL produced no indexable content"
+            )
+            logger.error(
+                "[INGEST] URL ingestion produced nothing (status=%s chunks=%s): %s",
+                status_value, chunks, detail,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"URL ingestion failed: {detail}",
+            )
+
         return {
-            "status": result.get("status", "success"),
+            "status": status_value,
             "ingestion_session_id": ingestion_session_id,
             "url": ingest_url,
             "ingestion_details": {
-                "chunks_created": result.get("chunks_created", 0),
+                "chunks_created": chunks,
                 "parent_docs_stored": result.get("parent_docs_stored", 0),
                 "collection_id": result.get("collection_id"),
                 "processing_time_seconds": result.get("processing_time_seconds", 0),

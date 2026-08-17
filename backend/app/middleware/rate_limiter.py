@@ -185,7 +185,13 @@ class RateLimiter:
                 self._backend = InMemoryRateLimiter()
                 logger.info("✓ Rate limiter using in-memory backend")
         except Exception as e:
-            logger.warning(f"Failed to initialize Redis rate limiter, using in-memory: {e}")
+            # Per-process counters mean N workers allow N x the configured
+            # limit, which materially weakens brute-force protection.
+            logger.error(
+                "REDIS RATE LIMITER UNAVAILABLE (%s) — falling back to "
+                "in-memory. Limits are per-process only and will NOT hold "
+                "across workers. Install `redis` and verify REDIS_URL.", e,
+            )
             self._backend = InMemoryRateLimiter()
     
     def is_allowed(self, key: str, limit: int, window_seconds: int) -> Tuple[bool, Dict[str, int]]:

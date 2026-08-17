@@ -37,8 +37,10 @@ class RetrieverConfig:
     chunk_size: int = 500  # Size of chunks for retrieval
     timeout_seconds: float = 30.0  # Timeout for retrieval operations
     
-    # ChromaDB parameters (now read from .env for consistency with ingestion_service.py)
-    chroma_collection_name: str = os.getenv("CHROMA_DEFAULT_COLLECTION", "code_and_docs")
+    # ChromaDB parameters. The collection is NOT configurable here: retrieval
+    # and ingestion must always address the same corpus, so both go through
+    # IngestionService.get_chroma_collection() (CANONICAL_COLLECTION). A
+    # separate name here previously pointed at a stale per-upload collection.
     chroma_persist_dir: str = "./chroma_db"
     
     def validate(self) -> bool:

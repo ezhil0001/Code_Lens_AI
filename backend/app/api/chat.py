@@ -19,13 +19,14 @@ The SemanticCache singleton lives in ``app.services.semantic_cache``.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -181,15 +182,18 @@ def _build_config(
     session_id: str,
     org_id: Optional[str],
     checkpoint_id: Optional[str],
+    trace_id: Optional[str] = None,
+    parent_span_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a LangGraph RunnableConfig, with Langfuse tracing attached.
 
     A per-request Langfuse ``CallbackHandler`` is added to ``callbacks`` so the
     whole supervisor run (intent routing → agents → retrieval → rerank →
-    generation → guardrails) is captured as one trace with full parent-child
-    spans, token usage, latency, and cost. Reserved ``langfuse_*`` metadata
-    keys bind the trace to the user and session. All of this is a safe no-op
-    when Langfuse is disabled.
+    generation → guardrails) is captured with full parent-child spans, token
+    usage, latency, and cost. ``parent_span_id`` nests that whole tree under
+    the request's root observation instead of making it a second root.
+    Reserved ``langfuse_*`` metadata keys bind the trace to the user and
+    session. All of this is a safe no-op when Langfuse is disabled.
     """
     try:
         from app.graph.checkpointing.pg_checkpointer import build_config
@@ -210,12 +214,37 @@ def _build_config(
         if checkpoint_id:
             cfg["configurable"]["checkpoint_id"] = checkpoint_id
 
-    trace_id = _attach_langfuse(cfg, user_id=user_id, session_id=session_id, org_id=org_id)
-    # Stash the minted trace id on the config so the caller can thread it into
-    # the graph state for deterministic evaluation scoring (C-2).
+    _attach_langfuse(
+        cfg,
+        user_id=user_id,
+        session_id=session_id,
+        org_id=org_id,
+        trace_id=trace_id,
+        parent_span_id=parent_span_id,
+    )
+    # Stash the trace id on the config so the caller can thread it into the
+    # graph state for deterministic evaluation scoring (C-2).
     if trace_id:
         cfg.setdefault("configurable", {})["langfuse_trace_id"] = trace_id
+    if parent_span_id:
+        cfg.setdefault("configurable", {})["langfuse_parent_span_id"] = parent_span_id
     return cfg
+
+
+def _mint_trace_id() -> Optional[str]:
+    """Take the single per-request sampling decision and mint its trace id.
+
+    Returns ``None`` when the request is not sampled or Langfuse is disabled,
+    which switches every downstream observation to a no-op. Never raises.
+    """
+    try:
+        from app.observability.langfuse_client import create_trace_id, should_sample
+        if not should_sample():
+            return None
+        return create_trace_id()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[chat] Langfuse trace id skipped: %s", exc)
+        return None
 
 
 def _attach_langfuse(
@@ -224,42 +253,30 @@ def _attach_langfuse(
     user_id: str,
     session_id: str,
     org_id: Optional[str],
-) -> Optional[str]:
+    trace_id: Optional[str],
+    parent_span_id: Optional[str] = None,
+) -> None:
     """Attach a Langfuse callback handler + trace metadata to a RunnableConfig.
 
-    Mints a deterministic trace id up front, pins the callback handler to it,
-    and returns it so the caller can store it in the graph state. This makes
-    evaluation scoring target the exact originating trace without relying on
-    ambient OTEL context inside node execution.
+    The handler is pinned to ``trace_id`` and, when available, to the request
+    root observation via ``parent_span_id`` so the LangGraph tree nests under
+    ``chat.supervisor`` rather than starting a parallel root observation.
 
-    Returns the trace id (or ``None`` when Langfuse is disabled).
     Never raises — observability failures must not break chat.
     """
+    if not trace_id:
+        return
     try:
         from app.observability.langfuse_client import (
             get_callback_handler,
             build_trace_metadata,
-            create_trace_id,
-            should_sample,
         )
-        if not should_sample():
-            return None
 
         tags = ["chat", "supervisor-graph"]
         if org_id:
             tags.append(f"org:{org_id}")
 
-        trace_id = create_trace_id()
-
-        # M-4: register trace ownership so only the requesting user can
-        # attach feedback scores to this trace.
-        try:
-            from app.observability.evaluation.feedback import register_trace_owner
-            register_trace_owner(trace_id, user_id)
-        except Exception:  # noqa: BLE001
-            pass
-
-        handler = get_callback_handler(trace_id=trace_id)
+        handler = get_callback_handler(trace_id=trace_id, parent_span_id=parent_span_id)
         if handler is not None:
             cfg.setdefault("callbacks", []).append(handler)
 
@@ -272,10 +289,8 @@ def _attach_langfuse(
         existing_md = cfg.get("metadata") or {}
         existing_md.update(md)
         cfg["metadata"] = existing_md
-        return trace_id
     except Exception as exc:  # noqa: BLE001
         logger.debug("[chat] Langfuse attach skipped: %s", exc)
-        return None
 
 
 def _build_initial_state(
@@ -285,6 +300,9 @@ def _build_initial_state(
     org_id: Optional[str],
     agent_hint: Optional[str],
     langfuse_trace_id: Optional[str] = None,
+    hil_enabled: bool = False,
+    hil_confidence_threshold: Optional[float] = None,
+    langfuse_parent_span_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Construct the AgentState for a fresh request."""
     try:
@@ -296,6 +314,7 @@ def _build_initial_state(
             org_id=org_id,
         )
     except Exception:  # noqa: BLE001
+        from app.graph.state import RESET
         state = {
             "query": query,
             "user_id": user_id,
@@ -307,19 +326,26 @@ def _build_initial_state(
             "nodes_visited": [],
             "guardrail_passed": True,
             "guardrail_violations": [],
-            "retrieved_chunks": [],
-            "reranked_chunks": [],
-            "agent_responses": {},
-            "sources": [],
+            "retrieved_chunks": RESET,
+            "reranked_chunks": RESET,
+            "agent_responses": RESET,
+            "sources": RESET,
             "final_response": None,
             "cache_hit": False,
         }
     if agent_hint:
         state["routing_decision"] = agent_hint
+    # The request's HIL settings were accepted by the schema and then dropped,
+    # so the UI's "HIL Review" toggle and threshold had no effect at all.
+    state["hil_enabled"] = bool(hil_enabled)
+    if hil_confidence_threshold is not None:
+        state["hil_confidence_threshold"] = float(hil_confidence_threshold)
     # Thread the Langfuse trace id through state so response_node can score the
     # exact originating trace without relying on ambient OTEL context (C-2).
     if langfuse_trace_id:
         state["langfuse_trace_id"] = langfuse_trace_id
+    if langfuse_parent_span_id:
+        state["langfuse_parent_span_id"] = langfuse_parent_span_id
     return state
 
 
@@ -372,10 +398,6 @@ async def chat_stream_v2(
     """
     user_id = str(current_user.id)
 
-    # Build the config FIRST so the per-request sampling decision + trace id
-    # exist before any instrumented service (cache) runs. All handler-level
-    # spans then join this single request trace (H-1) or no-op when the
-    # request is unsampled (H-2).
     # 2. Reconnect / resume
     resume_cp: Optional[str] = body.resume_from_checkpoint
     if not resume_cp:
@@ -384,56 +406,110 @@ async def chat_stream_v2(
             resume_cp = lei
             logger.info("[v2/chat] reconnect checkpoint=%s user=%s", lei, user_id)
 
-    # 3. Config + state
-    config = _build_config(
+    # One sampling decision + one trace id + ONE root observation per request,
+    # opened before any instrumented service runs. Everything downstream (cache
+    # lookup, LangGraph callback tree, background evaluation) parents to this
+    # root, so a request is exactly one trace with exactly one root named
+    # "chat.supervisor" — on the cache-hit path too.
+    from app.observability.tracing import open_request_root, request_trace
+
+    trace_id = _mint_trace_id()
+    tags = ["chat", "supervisor-graph"]
+    if body.org_id:
+        tags.append(f"org:{body.org_id}")
+    root = open_request_root(
+        "chat.supervisor",
+        trace_id=trace_id,
         user_id=user_id,
         session_id=body.session_id,
-        org_id=body.org_id,
-        checkpoint_id=resume_cp,
+        tags=tags,
+        input=body.query,
+        metadata={"request.source": "api", "hil.enabled": body.hil_enabled},
     )
-    trace_id = config.get("configurable", {}).get("langfuse_trace_id")
 
-    from app.observability.tracing import request_trace
-
-    # 1. Cache — inside the request trace context so the lookup span nests
-    # under this request's trace instead of rooting its own.
-    with request_trace(trace_id):
-        # Z-2: semantic_cache.get is synchronous (embedding + pgvector query,
-        # ~300ms). Run it in a worker thread so the event loop keeps serving
-        # other requests. asyncio.to_thread copies contextvars, so the span
-        # still nests under this request's trace.
-        hit = await asyncio.to_thread(semantic_cache.get, body.query, user_id=user_id)
-    if hit:
-        return _cached_stream_v2(hit, body.session_id, trace_id=trace_id)
-
-    if resume_cp:
-        initial_state = None
-        logger.info("[v2/chat] resuming thread=%s", config["configurable"].get("thread_id"))
-    else:
-        initial_state = _build_initial_state(
-            query=body.query,
+    try:
+        # 3. Config + state
+        config = _build_config(
             user_id=user_id,
             session_id=body.session_id,
             org_id=body.org_id,
-            agent_hint=body.agent_hint,
-            langfuse_trace_id=config.get("configurable", {}).get("langfuse_trace_id"),
-        )
-        logger.info(
-            "[v2/chat] new thread=%s hint=%s",
-            config["configurable"].get("thread_id"), body.agent_hint,
+            checkpoint_id=resume_cp,
+            trace_id=trace_id,
+            parent_span_id=root.span_id,
         )
 
-    # 4. Graph
-    graph = await _build_graph_async()
-    if graph is None:
-        return StreamingResponse(
-            _fatal_error_stream("Supervisor graph is currently unavailable. Please try again."),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        # 1. Cache — inside the request trace context so the lookup span nests
+        # under this request's root span instead of rooting its own trace.
+        with request_trace(trace_id, root.span_id):
+            # Z-2: semantic_cache.get is synchronous (embedding + pgvector query,
+            # ~300ms). Run it in a worker thread so the event loop keeps serving
+            # other requests. run_retrieval copies no contextvars implicitly, so we
+            # bind the trace with request_trace above; the span still nests here.
+            #
+            # It must use the *bounded retrieval* pool, not asyncio's default one:
+            # this is model inference, and /api/health also does asyncio.to_thread.
+            # With N concurrent requests embedding on the 12-thread default pool,
+            # health could not obtain a thread and timed out (000) under load.
+            from app.core.database import run_retrieval
+            # The cache is an optimisation, not a dependency. It was unguarded, so
+            # a Postgres/pgvector outage turned every chat request into a 500.
+            try:
+                hit = await run_retrieval(
+                    functools.partial(semantic_cache.get, body.query, user_id=user_id)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[chat] semantic cache lookup failed (%s) — treating as miss", exc)
+                hit = None
+
+        if hit:
+            return _cached_stream_v2(
+                hit, body.session_id, trace_id=trace_id, user_id=user_id,
+                query=body.query, root=root,
+            )
+
+        if resume_cp:
+            initial_state = None
+            logger.info("[v2/chat] resuming thread=%s", config["configurable"].get("thread_id"))
+        else:
+            initial_state = _build_initial_state(
+                query=body.query,
+                user_id=user_id,
+                session_id=body.session_id,
+                org_id=body.org_id,
+                agent_hint=body.agent_hint,
+                langfuse_trace_id=trace_id,
+                hil_enabled=body.hil_enabled,
+                hil_confidence_threshold=body.hil_confidence_threshold,
+                langfuse_parent_span_id=root.span_id,
+            )
+            logger.info(
+                "[v2/chat] new thread=%s hint=%s",
+                config["configurable"].get("thread_id"), body.agent_hint,
+            )
+
+        # 4. Graph
+        graph = await _build_graph_async()
+        if graph is None:
+            root.end(
+                level="ERROR",
+                status_message="supervisor graph unavailable",
+                output={"error": "graph_unavailable"},
+            )
+            return StreamingResponse(
+                _fatal_error_stream("Supervisor graph is currently unavailable. Please try again."),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+    except BaseException as exc:
+        # Never leave the root observation open — it would show as a hung trace.
+        root.end(level="ERROR", status_message=f"{type(exc).__name__}: {exc}")
+        raise
 
     return StreamingResponse(
-        _graph_stream_v2(graph, initial_state, config, body.query, user_id, trace_id=trace_id),
+        _graph_stream_v2(
+            graph, initial_state, config, body.query, user_id,
+            trace_id=trace_id, session_id=body.session_id, root=root,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -447,15 +523,37 @@ async def chat_stream_v2(
     )
 
 
-async def _graph_stream_v2(graph, initial_state, config, query: str, user_id: str, trace_id: Optional[str] = None):
+async def _persist_turn(
+    user_id: str, session_id: Optional[str], query: str, answer: str
+) -> None:
+    """Append the completed turn to durable chat history.
+
+    Nothing wrote to ChatMemoryManager, so GET /history always returned an
+    empty list and a browser refresh silently lost the conversation. Keyed
+    ``{user_id}::{session_id}`` to match the read path and stay IDOR-safe.
+    """
+    if not session_id or not answer:
+        return
+    scoped = session_id if session_id.startswith(f"{user_id}::") else f"{user_id}::{session_id}"
+    try:
+        from app.services.agents.langchain_memory_manager import ChatMemoryManager
+        mgr = ChatMemoryManager()
+        await mgr.add_message(scoped, user_id, "user", query)
+        await mgr.add_message(scoped, user_id, "assistant", answer)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[chat] history persist failed for %s: %s", scoped, exc)
+
+
+async def _graph_stream_v2(graph, initial_state, config, query: str, user_id: str, trace_id: Optional[str] = None, session_id: Optional[str] = None, root: Optional[Any] = None):
     """Wrap stream_graph_events() and accumulate tokens for cache writing."""
     from app.graph.streaming import stream_graph_events
-    from app.observability.tracing import request_trace
+    from app.observability.tracing import RequestRootSpan, request_trace
 
     accumulated = ""
     cache_written = False  # F-3: guarantee exactly one cache write per request
     completed = False      # Z-3: only cache COMPLETE responses (done event seen)
-    with request_trace(trace_id):
+    root = root if root is not None else RequestRootSpan(None, trace_id)
+    with request_trace(trace_id, root.span_id):
         try:
             async for chunk in stream_graph_events(graph, initial_state, config):
                 try:
@@ -463,6 +561,10 @@ async def _graph_stream_v2(graph, initial_state, config, query: str, user_id: st
                     t = payload.get("type")
                     if t == "token":
                         accumulated += payload.get("data", {}).get("content", "")
+                    elif t == "token_reset":
+                        # Synthesis supersedes the per-agent drafts; cache the
+                        # final answer only, never drafts + synthesis.
+                        accumulated = ""
                     elif t == "done":
                         # Z-3: mark completion only on a clean done event that
                         # is not itself reporting an upstream error.
@@ -478,7 +580,7 @@ async def _graph_stream_v2(graph, initial_state, config, query: str, user_id: st
                 except Exception:  # noqa: BLE001
                     pass
                 yield chunk
-        except BaseException:
+        except BaseException as exc:
             # Z-3: client disconnect / cancellation / error → do NOT cache the
             # partial response (poisoning risk: truncated answers would be
             # served verbatim to future semantically-similar queries).
@@ -487,33 +589,65 @@ async def _graph_stream_v2(graph, initial_state, config, query: str, user_id: st
                     "[chat] discarding %d partial chars on disconnect (not cached)",
                     len(accumulated),
                 )
+            root.update(level="ERROR", status_message=f"{type(exc).__name__}: {exc}")
             raise
         finally:
             # Normal completion path → write exactly once, only if complete.
             if completed and not cache_written:
-                # Z-2: cache write embeds + INSERTs synchronously; offload it.
-                await asyncio.to_thread(_cache_write, query, accumulated, user_id)
+                # Z-2: cache write embeds + INSERTs synchronously; offload it to
+                # the bounded retrieval pool (model inference), never the
+                # default executor that /api/health shares.
+                # Guarded independently: a cache-write failure must not abort
+                # the response, and must not skip history persistence.
+                from app.core.database import run_retrieval
                 cache_written = True
+                try:
+                    await run_retrieval(
+                        functools.partial(_cache_write, query, accumulated, user_id)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[chat] semantic cache write failed: %s", exc)
+                await _persist_turn(user_id, session_id, query, accumulated)
+            root.end(output=accumulated[:2000] if accumulated else None)
 
 
 # ---------------------------------------------------------------------------
 # Cache helper stream
 # ---------------------------------------------------------------------------
 
-def _cached_stream_v2(hit: dict, session_id: str, trace_id: Optional[str] = None) -> StreamingResponse:
+def _cached_stream_v2(
+    hit: dict,
+    session_id: str,
+    trace_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    query: Optional[str] = None,
+    root: Optional[Any] = None,
+) -> StreamingResponse:
     """Stream a cache hit in the v2 typed envelope format."""
     async def _gen():
-        yield _sse_envelope("token", {"content": hit["response"]}, agent="Cache")
-        yield _sse_envelope(
-            "done",
-            {
-                "cached": True,
-                "similarity": hit["similarity"],
-                "original_query": hit["query"],
-                "session_id": session_id,
-                "trace_id": trace_id,
-            },
-        )
+        try:
+            yield _sse_envelope("token", {"content": hit["response"]}, agent="Cache")
+            yield _sse_envelope(
+                "done",
+                {
+                    "cached": True,
+                    "similarity": hit["similarity"],
+                    "original_query": hit["query"],
+                    "session_id": session_id,
+                    "trace_id": trace_id,
+                },
+            )
+            # A cache hit is still a conversation turn. This path bypasses
+            # _graph_stream_v2, so without this the turn never reached history and
+            # a refresh lost every cached answer.
+            if user_id and query:
+                await _persist_turn(user_id, session_id, query, hit["response"])
+        finally:
+            if root is not None:
+                root.end(
+                    output=str(hit.get("response", ""))[:2000],
+                    metadata={"cache.hit": True, "cache.similarity": hit.get("similarity")},
+                )
     return StreamingResponse(
         _gen(),
         media_type="text/event-stream",
@@ -570,7 +704,7 @@ async def get_chat_history(session_id: str, current_user=Depends(_current_user_d
     logger.info("[chat] history request session=%s user=%s", session_id, user_id)
     try:
         from app.services.agents.langchain_memory_manager import ChatMemoryManager
-        messages = await ChatMemoryManager().get_history(scoped_session) or []
+        messages = await ChatMemoryManager().get_messages(scoped_session) or []
         return {
             "session_id": session_id,
             "messages": messages,
@@ -578,7 +712,7 @@ async def get_chat_history(session_id: str, current_user=Depends(_current_user_d
             "created_at": datetime.now().isoformat(),
         }
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[chat] history load failed %s: %s", session_id, exc)
+        logger.exception("[chat] history load failed %s: %s", session_id, exc)
         return {
             "session_id": session_id,
             "messages": [],
@@ -600,15 +734,36 @@ async def submit_feedback(body: FeedbackRequest, current_user=Depends(_current_u
     """
     try:
         from app.observability.evaluation import record_user_feedback
+        from app.observability.tracing import get_trace_owner
+
+        user_id = str(getattr(current_user, "id", "anonymous"))
+        # Any authenticated user could previously score ANY trace id, including
+        # another user's trace or a fabricated one, poisoning its evaluation
+        # data. Only the trace's owner may submit feedback for it.
+        owner = get_trace_owner(body.trace_id)
+        if owner is None:
+            logger.warning(
+                "[chat] feedback rejected — unknown/expired trace %s", body.trace_id
+            )
+            raise HTTPException(status_code=404, detail="Unknown trace")
+        if owner != user_id:
+            logger.warning(
+                "[chat] feedback rejected — user %s does not own trace %s",
+                user_id, body.trace_id,
+            )
+            raise HTTPException(status_code=403, detail="Not your trace")
+
         recorded = record_user_feedback(
             trace_id=body.trace_id,
             thumbs_up=body.thumbs_up,
             rating=body.rating,
             comment=body.comment,
-            user_id=str(getattr(current_user, "id", "anonymous")),
+            user_id=user_id,
             session_id=body.session_id,
         )
         return {"success": True, "recorded": recorded}
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("[chat] feedback failed: %s", exc)
         return {"success": False, "recorded": False}

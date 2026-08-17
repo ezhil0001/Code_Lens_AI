@@ -134,12 +134,26 @@ async def _get_saver():
         return None
 
 
-def _get_graph():
+_GRAPH = None
+
+
+async def _get_graph():
+    """Compile the supervisor graph against the *async* Postgres checkpointer.
+
+    The sync builder falls back to an in-memory saver when an event loop is
+    running, which makes every persisted checkpoint invisible to replay,
+    branch and resume.
+    """
+    global _GRAPH
+    if _GRAPH is not None:
+        return _GRAPH
     try:
-        from app.graph.checkpointing.pg_checkpointer import get_checkpointer_sync
         from app.graph.supervisor_graph import build_supervisor_graph
-        saver = get_checkpointer_sync()
-        return build_supervisor_graph(checkpointer=saver)
+        saver = await _get_saver()
+        if saver is None:
+            return None
+        _GRAPH = build_supervisor_graph(checkpointer=saver)
+        return _GRAPH
     except Exception as exc:  # noqa: BLE001
         logger.warning("[checkpoints API] supervisor graph unavailable: %s", exc)
         return None
@@ -176,6 +190,12 @@ async def list_checkpoints(
             async for cp_tuple in saver.alist(config):
                 cp_config = cp_tuple.config or {}
                 configurable = cp_config.get("configurable", {})
+                # Agent sub-graphs write their own checkpoints under a namespace
+                # (e.g. "DocAgent:<uuid>"). Those ids are not addressable from
+                # the root thread, so replay/branch on them 404s. Only the root
+                # namespace represents a real conversation checkpoint.
+                if configurable.get("checkpoint_ns"):
+                    continue
                 cp_id = configurable.get("checkpoint_id", "")
                 parent_cfg = cp_tuple.parent_config or {}
                 parent_id = (parent_cfg.get("configurable") or {}).get("checkpoint_id")
@@ -282,24 +302,34 @@ async def replay_from_checkpoint(
     thread_id = build_thread_id(str(current_user.id), session_id)
     branch_thread_id = build_branch_thread_id(thread_id, checkpoint_id)
 
-    graph = _get_graph()
+    graph = await _get_graph()
     if graph is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Supervisor graph unavailable",
         )
 
+    # Time travel must address the checkpoint on the thread that owns it.
+    # Pointing at a fresh branch thread leaves LangGraph with no saved state,
+    # which surfaces to the client as "Received no input for __start__".
     config = {
         "configurable": {
-            "thread_id": branch_thread_id,
+            "thread_id": thread_id,
             "checkpoint_id": checkpoint_id,
         },
         "recursion_limit": 25,
     }
 
+    snapshot = await graph.aget_state(config)
+    if snapshot is None or not snapshot.values:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Checkpoint {checkpoint_id} not found for this session",
+        )
+
     logger.info(
-        "[replay] branch_thread=%s from checkpoint=%s",
-        branch_thread_id, checkpoint_id
+        "[replay] thread=%s from checkpoint=%s",
+        thread_id, checkpoint_id
     )
 
     return StreamingResponse(
@@ -341,16 +371,54 @@ async def branch_conversation(
     # The branch_session_id is derived from the branch thread for client routing
     branch_session_id = f"branch-{body.from_checkpoint_id[:8]}"
 
+    graph = await _get_graph()
+    if graph is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Supervisor graph unavailable",
+        )
+
+    # Read the historical state from the thread that owns the checkpoint. The
+    # thread_id is namespaced to the caller, so another user's checkpoint is
+    # simply not found rather than readable.
+    source_config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_id": body.from_checkpoint_id,
+        }
+    }
+    snapshot = await graph.aget_state(source_config)
+    if snapshot is None or not snapshot.values:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Checkpoint {body.from_checkpoint_id} not found for this session",
+        )
+
+    # Copy the state onto the branch thread so it becomes an independent,
+    # continuable lineage. Without this the branch thread has no checkpoint and
+    # any replay/resume against it fails with "Received no input for __start__".
+    values = dict(snapshot.values)
     if body.new_query:
-        # Inject new query — actual graph resume happens when client opens SSE
+        values["query"] = body.new_query
+        values["final_response"] = None
         logger.info(
-            "[branch] injecting new_query=%r into branch_thread=%s",
+            "[branch] new_query=%r applied to branch_thread=%s",
             body.new_query[:60], branch_thread_id
         )
 
+    branch_config = {"configurable": {"thread_id": branch_thread_id}}
+    await graph.aupdate_state(branch_config, values)
+
+    branch_state = await graph.aget_state(branch_config)
+    if branch_state is None or not branch_state.values:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Branch was created but no state could be persisted",
+        )
+
     logger.info(
-        "[branch] created branch_thread=%s from checkpoint=%s",
-        branch_thread_id, body.from_checkpoint_id
+        "[branch] branch_thread=%s seeded from checkpoint=%s (%d state keys)",
+        branch_thread_id, body.from_checkpoint_id, len(branch_state.values),
     )
 
     return BranchResponse(
@@ -358,8 +426,9 @@ async def branch_conversation(
         branch_thread_id=branch_thread_id,
         from_checkpoint_id=body.from_checkpoint_id,
         message=(
-            f"Branch created from checkpoint {body.from_checkpoint_id[:8]}. "
-            f"Use session_id='{branch_session_id}' to stream the replay."
+            f"Branch created from checkpoint {body.from_checkpoint_id[:8]} "
+            f"with {len(branch_state.values)} state keys. "
+            f"Use session_id='{branch_session_id}' to continue this branch."
         ),
     )
 
@@ -395,9 +464,10 @@ async def resume_after_hil(
     """
     from app.graph.checkpointing.pg_checkpointer import build_thread_id, build_config
     from app.graph.streaming import stream_graph_events
+    from langgraph.types import Command
 
     thread_id = build_thread_id(str(current_user.id), session_id)
-    graph = _get_graph()
+    graph = await _get_graph()
 
     if graph is None:
         raise HTTPException(
@@ -414,26 +484,109 @@ async def resume_after_hil(
         checkpoint_id=body.checkpoint_id,
     )
 
-    # Inject human decision into the state update sent on resume.
-    hil_state_update: Dict[str, Any] = {
-        "hil_approved": body.approved,
-        "hil_human_input": body.human_input,
-        "hil_required": False,   # clear the interrupt flag
-    }
+    # Resume MUST run in the root checkpoint namespace. build_config sets
+    # checkpoint_ns=<org_id|"default">, but LangGraph reads checkpoint_ns as a
+    # SUBGRAPH name, so resuming with it raises "Subgraph default not found"
+    # and the human decision is silently discarded.
+    configurable = dict(config.get("configurable") or {})
+    configurable["checkpoint_ns"] = ""
+    config = {**config, "configurable": configurable}
 
-    # H-2: official LangGraph resume — write the human decision into the
-    # persisted thread state at the interrupted checkpoint, then re-invoke
-    # the graph with input=None so execution continues from hil_check_node
-    # (which now sees hil_approved set and passes through).
+    # A resume is only meaningful against a thread that is actually paused on a
+    # human-review interrupt. Without this guard the endpoint answered 200 and
+    # *started a fresh graph run* on the caller's own thread for any session
+    # name: a second Approve click, an Approve racing a Reject, a resume after
+    # the decision was already made, or another user probing someone else's
+    # session id all silently burned LLM quota and wrote phantom checkpoints.
+    # The thread is namespaced per user, so this also makes an unauthorised
+    # attempt fail closed and indistinguishable from a nonexistent session.
     try:
-        await graph.aupdate_state(config, hil_state_update, as_node="hil_check_node")
+        # Check the thread's LATEST state, not body.checkpoint_id. Pinning the
+        # config to a historical checkpoint returns that past snapshot, whose
+        # `tasks` are empty — the owner's own legitimate Approve would 409.
+        latest_cfg = {**config, "configurable": {
+            k: v for k, v in configurable.items() if k != "checkpoint_id"
+        }}
+        snapshot = await graph.aget_state(latest_cfg)
+        pending = [
+            i
+            for task in (getattr(snapshot, "tasks", None) or [])
+            for i in (getattr(task, "interrupts", None) or [])
+        ]
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[resume] aupdate_state failed (%s) — falling back to input merge", exc)
+        logger.warning("[resume] could not read thread state: %s", exc)
+        snapshot, pending = None, []
+
+    if not pending:
+        logger.info(
+            "[resume] rejected — no pending interrupt for user=%s session=%s",
+            current_user.id, session_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No pending human-review interrupt for this session",
+        )
+
+    # Official LangGraph resume for a dynamic interrupt(): Command(resume=...)
+    # hands the payload straight back to the paused hil_check_node, which then
+    # decides what happens next (refuse, or release the agents).
+    #
+    # Do NOT also call aupdate_state(as_node="hil_check_node") here. That
+    # *replaces* the node's output instead of resuming it, so it satisfied the
+    # interrupt before Command could: the node never ran, never produced its
+    # refusal, and response_node emitted final_response of length 0 — the
+    # browser showed an empty answer on reject. The human decision is still
+    # durably recorded by _audit_hil_event below, and by the node itself
+    # writing hil_approved/hil_human_input into the checkpoint on resume.
+    resume_input = Command(resume={
+        "approved": body.approved,
+        "human_input": body.human_input,
+    })
 
     logger.info(
         "[resume] user=%s session=%s approved=%s checkpoint=%s",
         current_user.id, session_id, body.approved, body.checkpoint_id,
     )
+
+    # Continue the ORIGINAL trace instead of minting a new one. The interrupted
+    # run persisted its trace id in state, so reusing it makes the reviewer's
+    # decision and everything it unblocks land under the same Langfuse trace as
+    # the question that triggered the review. Without this the UI showed two
+    # unrelated traces and the HIL story was impossible to follow.
+    values = getattr(snapshot, "values", None) or {}
+    origin_trace_id = values.get("langfuse_trace_id")
+    origin_root_span_id = values.get("langfuse_parent_span_id")
+    from app.api.chat import _attach_langfuse
+    from app.observability.tracing import open_request_root
+
+    root = open_request_root(
+        "chat.hil_resume",
+        trace_id=origin_trace_id,
+        user_id=str(current_user.id),
+        session_id=session_id,
+        tags=["chat", "hil", "hil-resume"],
+        input=body.human_input,
+        metadata={
+            "request.source": "hil-resume",
+            "hil.approved": body.approved,
+            "hil.checkpoint_id": body.checkpoint_id,
+            "hil.origin_trace_id": origin_trace_id,
+        },
+        parent_span_id=origin_root_span_id,
+    )
+    if origin_trace_id:
+        configurable["langfuse_trace_id"] = origin_trace_id
+        if root.span_id:
+            configurable["langfuse_parent_span_id"] = root.span_id
+        _attach_langfuse(
+            config,
+            user_id=str(current_user.id),
+            session_id=session_id,
+            org_id=getattr(current_user, "org_id", None),
+            trace_id=origin_trace_id,
+            parent_span_id=root.span_id,
+        )
+        config = {**config, "configurable": configurable}
 
     # Persist HIL audit event (best-effort; non-blocking)
     _audit_hil_event(
@@ -445,7 +598,7 @@ async def resume_after_hil(
     )
 
     return StreamingResponse(
-        stream_graph_events(graph, None, config),
+        _resumed_stream(graph, resume_input, config, root, origin_trace_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -453,6 +606,27 @@ async def resume_after_hil(
             "X-HIL-Approved": str(body.approved).lower(),
         },
     )
+
+
+async def _resumed_stream(graph, resume_input, config, root, trace_id):
+    """Stream the resumed graph inside the original trace, closing the root.
+
+    The root observation has to outlive the whole SSE stream, so it is ended in
+    a finally here rather than by a context manager around the endpoint — the
+    endpoint returns as soon as the response starts.
+    """
+    from app.graph.streaming import stream_graph_events
+    from app.observability.tracing import request_trace
+
+    try:
+        with request_trace(trace_id, root.span_id):
+            async for chunk in stream_graph_events(graph, resume_input, config):
+                yield chunk
+    finally:
+        try:
+            root.end()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[resume] root span end failed: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

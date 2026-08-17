@@ -217,7 +217,6 @@ class TestBackwardCompatShim:
             patch("app.services.pipeline_factory.LLMClientFactory.get_instance", return_value=mock_llmf),
             patch("app.services.pipeline_factory.MemoryFactory.get_instance", return_value=mock_memf),
             patch("app.services.pipeline_factory.PromptFactory.get_instance", return_value=mock_pf),
-            patch("app.services.pipeline_factory.RAGPipelineFactory._init_observability"),
             # Suppress AgenticRouter + AgentBrain — not under test here
             patch("app.services.agents.agentic_router.AgenticRouter", MagicMock(), create=True),
             patch("app.services.agents.agent_brain.AgentBrain", MagicMock(), create=True),

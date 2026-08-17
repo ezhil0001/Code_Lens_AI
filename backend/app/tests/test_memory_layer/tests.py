@@ -136,21 +136,30 @@ async def _test_stm_token_budget() -> TestResult:
 
 async def _test_ltm_table_exists() -> TestResult:
     try:
+        import asyncio
+
         from app.core.database import get_pg_pool
         pool = get_pg_pool()
         if pool is None:
             return TestResult.skipped("pg_pool not available (Postgres not running)")
-        async with pool.connection() as conn:
-            row = await conn.fetchrow(
-                """SELECT 1 FROM information_schema.tables
-                   WHERE table_name = 'agent_long_term_memory'"""
-            )
+
+        def _probe():
+            # psycopg3 pools are synchronous; the asyncpg-style `async with` +
+            # fetchrow used before always raised and masked the result as a skip.
+            with pool.connection() as conn:
+                cur = conn.execute(
+                    """SELECT 1 FROM information_schema.tables
+                       WHERE table_name = 'agent_long_term_memory'"""
+                )
+                return cur.fetchone()
+
+        row = await asyncio.to_thread(_probe)
         if row is None:
             return TestResult.failed(
                 "agent_long_term_memory table does not exist",
                 detail=(
-                    "Run the Prisma migration: "
-                    "20240617_add_ltm_table adds VECTOR(768) column + ivfflat index"
+                    "Run: python -m app.db.migrations.ltm_migration "
+                    "(creates VECTOR(768) column + hnsw index)"
                 )
             )
         return TestResult.passed("agent_long_term_memory table exists ✓")

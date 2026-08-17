@@ -162,7 +162,11 @@ async def _test_close_db_sync() -> TestResult:
 # ── H-1: retrieval offloaded ─────────────────────────────────────────────────
 
 async def _test_retrieval_offloaded() -> TestResult:
-    """R-007: every agent retrieve node runs sync retrieval via asyncio.to_thread."""
+    """R-007: every agent retrieve node must offload sync retrieval off the loop.
+
+    Valid offloads are ``run_retrieval`` (the dedicated bounded retrieval pool)
+    or ``asyncio.to_thread`` for non-retrieval blocking calls such as Tavily.
+    """
     problems = []
     for name, mod_name, fns in [
         ("code", "app.graph.agents.code_agent", ["code_retrieve_node"]),
@@ -179,7 +183,8 @@ async def _test_retrieval_offloaded() -> TestResult:
             if f is None:
                 continue
             src = inspect.getsource(f)
-            if "retriever.retrieve(" in src and "to_thread" not in src:
+            offloaded = "run_retrieval" in src or "to_thread" in src
+            if "retriever.retrieve(" in src and not offloaded:
                 problems.append(f"{name}.{fn}")
     # web agent: Tavily must be to_thread + wait_for
     mod, err = _try_import("app.graph.agents.web_agent")
@@ -189,43 +194,62 @@ async def _test_retrieval_offloaded() -> TestResult:
             problems.append("web.web_search_node")
     if problems:
         return TestResult.failed(f"sync retrieval still on the event loop in: {problems}")
-    return TestResult.passed("all agent retrieval + Tavily offloaded via to_thread ✓")
+    return TestResult.passed("all agent retrieval offloaded to the dedicated pool; Tavily via to_thread ✓")
 
 
 # ── H-2: HIL interrupt ───────────────────────────────────────────────────────
 
 async def _test_hil_interrupts() -> TestResult:
-    """R-008: hil_check_node raises NodeInterrupt for a destructive query
-    with no recorded human decision, and passes through once approved."""
-    mod, err = _try_import("app.graph.nodes.hil_node")
-    if err:
-        return TestResult.skipped("hil_node not importable")
-    try:
-        from langgraph.errors import NodeInterrupt  # type: ignore
-    except ImportError:
-        try:
-            from langgraph.types import NodeInterrupt  # type: ignore
-        except ImportError:
-            return TestResult.skipped("langgraph NodeInterrupt not available")
+    """R-008: the REAL compiled supervisor graph pauses at the HIL gate for a
+    destructive query and resumes on approval.
 
-    state = {"query": "drop table users", "routing_confidence": 0.99,
-             "nodes_visited": [], "hil_approved": None}
+    Asserting only on the node function is a false-positive: the node can raise
+    while the compiled graph still runs to completion. This drives the actual
+    graph so a non-interrupting build fails.
+    """
+    sup, err = _try_import("app.graph.supervisor_graph")
+    if err:
+        return TestResult.skipped("supervisor_graph not importable")
+    state_mod, s_err = _try_import("app.graph.state")
+    if s_err:
+        return TestResult.skipped("graph state not importable")
     try:
-        await mod.hil_check_node(dict(state))
-        return TestResult.failed("hil_check_node did NOT interrupt on destructive query")
-    except NodeInterrupt:
-        pass  # correct — the graph pauses
-    # After human approval it must pass through without raising.
-    approved = dict(state, hil_approved=True)
-    out = await mod.hil_check_node(approved)
-    if not isinstance(out, dict):
-        return TestResult.failed("post-approval pass-through returned non-dict")
-    # After rejection the response is replaced.
-    rejected = dict(state, hil_approved=False)
-    out2 = await mod.hil_check_node(rejected)
-    if "rejected" not in str(out2.get("final_response", "")).lower():
-        return TestResult.failed("rejection did not replace final_response")
-    return TestResult.passed("HIL truly interrupts; approval passes; rejection blocks ✓")
+        from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.types import Command
+    except ImportError:
+        return TestResult.skipped("langgraph checkpoint/types unavailable")
+
+    graph = sup.build_supervisor_graph(checkpointer=MemorySaver())
+    cfg = {"configurable": {"thread_id": "r008-hil"}, "recursion_limit": 25}
+    init = state_mod.make_initial_state(
+        "drop table users and remove all data", "r008-user", "r008-user::r008"
+    )
+
+    out = await graph.ainvoke(init, cfg)
+    if "__interrupt__" not in out:
+        return TestResult.failed(
+            "compiled graph did NOT interrupt on a destructive query"
+        )
+
+    snap = await graph.aget_state(cfg)
+    if not snap.next:
+        return TestResult.failed("graph did not pause — no pending next node")
+    if "hil_check_node" not in snap.next:
+        return TestResult.failed(f"paused at {snap.next}, expected hil_check_node")
+    if not (snap.tasks and snap.tasks[0].interrupts):
+        return TestResult.failed("no interrupt payload persisted on the checkpoint")
+
+    resumed = await graph.ainvoke(Command(resume={"approved": True}), cfg)
+    if not isinstance(resumed, dict) or not resumed.get("final_response"):
+        return TestResult.failed("approval did not produce a final response")
+
+    after = await graph.aget_state(cfg)
+    if after.next:
+        return TestResult.failed(f"graph still pending after approval: {after.next}")
+
+    return TestResult.passed(
+        "compiled graph interrupts at HIL, persists the interrupt, and resumes ✓"
+    )
 
 
 # ── H-3: health ──────────────────────────────────────────────────────────────
@@ -243,9 +267,17 @@ async def _test_health_router_live() -> TestResult:
     main_mod, m_err = _try_import("app.main")
     if m_err:
         return TestResult.skipped(f"app.main not importable ({m_err[:60]})")
-    paths = {str(getattr(r, "path", "")) for r in main_mod.app.routes}
+    # FastAPI >= 0.141 keeps an _IncludedRouter object in app.routes instead of
+    # flattening included routes, so `r.path` no longer sees them. The OpenAPI
+    # schema reflects what is actually served, on every version.
+    try:
+        paths = set(main_mod.app.openapi().get("paths", {}))
+    except Exception as exc:  # noqa: BLE001
+        return TestResult.error(exc)
     if "/api/v1/health/detailed" not in paths:
-        return TestResult.failed("detailed health endpoints not mounted")
+        return TestResult.failed(
+            f"detailed health endpoints not mounted ({len(paths)} paths served)"
+        )
     return TestResult.passed("health checker repaired and mounted ✓")
 
 
@@ -327,6 +359,128 @@ async def _test_no_utcnow_in_auth() -> TestResult:
     return TestResult.passed("auth path uses timezone-aware datetimes ✓")
 
 
+async def _test_branch_seeds_state() -> TestResult:
+    """R-013: branching copies checkpoint state onto an independent thread.
+
+    The endpoint previously returned a fabricated success without touching the
+    checkpointer, so the branch thread had no state and could never continue.
+    """
+    sup, err = _try_import("app.graph.supervisor_graph")
+    if err:
+        return TestResult.skipped("supervisor_graph not importable")
+    state_mod, s_err = _try_import("app.graph.state")
+    if s_err:
+        return TestResult.skipped("graph state not importable")
+    try:
+        from langgraph.checkpoint.memory import MemorySaver
+    except ImportError:
+        return TestResult.skipped("langgraph checkpoint unavailable")
+
+    graph = sup.build_supervisor_graph(checkpointer=MemorySaver())
+    src = {"configurable": {"thread_id": "r013-src"}}
+    await graph.aupdate_state(src, state_mod.make_initial_state("q", "u", "u::s"))
+
+    snap = await graph.aget_state(src)
+    if not snap.values:
+        return TestResult.skipped("could not seed a source checkpoint")
+
+    branch = {"configurable": {"thread_id": "r013-branch"}}
+    if (await graph.aget_state(branch)).values:
+        return TestResult.failed("branch thread unexpectedly had pre-existing state")
+
+    await graph.aupdate_state(branch, dict(snap.values))
+    seeded = await graph.aget_state(branch)
+    if not seeded.values:
+        return TestResult.failed(
+            "branch thread has no state — branching did not copy the checkpoint"
+        )
+    if not (await graph.aget_state(src)).values:
+        return TestResult.failed("source thread lost state after branching")
+
+    return TestResult.passed(
+        f"branch seeded with {len(seeded.values)} state keys; source intact ✓"
+    )
+
+
+async def _test_checkpoint_list_root_only() -> TestResult:
+    """R-014: the checkpoint listing skips agent sub-graph namespaces.
+
+    Sub-graph checkpoints (``DocAgent:<uuid>``) are not addressable from the
+    root thread, so surfacing them made Replay/Branch 404 in the UI.
+    """
+    mod, err = _try_import("app.api.checkpoints")
+    if err:
+        return TestResult.skipped("checkpoints API not importable")
+    src = inspect.getsource(mod.list_checkpoints)
+    if "checkpoint_ns" not in src:
+        return TestResult.failed(
+            "list_checkpoints does not filter sub-graph namespaces — "
+            "replay/branch will 404 on those ids"
+        )
+    return TestResult.passed("checkpoint listing filters sub-graph namespaces ✓")
+
+
+async def _test_jwt_secret_not_forgeable() -> TestResult:
+    """R-016: the JWT secret must come from validated Settings, never a default.
+
+    ``jwt.py`` used ``os.getenv("SECRET_KEY", "your-secret-key-change-in-
+    production")``. ``.env`` is read by pydantic-settings into ``Settings`` and
+    NOT into ``os.environ``, so the auth layer signed and verified with the
+    public default committed to this repo. A token forged with that string was
+    accepted by ``/api/v1/auth/me`` with ``isAdmin: true`` — a complete
+    authentication bypass and privilege escalation.
+    """
+    import importlib
+    import inspect
+
+    from app.core.config import get_settings
+
+    jwt_mod = importlib.import_module("app.auth.jwt")
+    settings = get_settings()
+
+    insecure = "your-secret-key-change-in-production"
+    if jwt_mod.SECRET_KEY == insecure:
+        return TestResult.failed(
+            "auth signs JWTs with the public default secret — tokens are forgeable"
+        )
+    if len(jwt_mod.SECRET_KEY) < 32:
+        return TestResult.failed(f"JWT secret too short ({len(jwt_mod.SECRET_KEY)} chars)")
+    if jwt_mod.SECRET_KEY != settings.secret_key:
+        return TestResult.failed(
+            "auth secret differs from Settings.secret_key — tokens would be "
+            "invalidated unpredictably across restarts"
+        )
+
+    # The module-level secret must come from the validated loader, not a
+    # getenv-with-default expression.
+    import ast
+    tree = ast.parse(inspect.getsource(jwt_mod))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(getattr(t, "id", None) == "SECRET_KEY" for t in node.targets):
+            continue
+        if not (isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "id", None) == "_load_jwt_secret"):
+            return TestResult.failed(
+                "SECRET_KEY is not assigned from the validated _load_jwt_secret()"
+            )
+        break
+    else:
+        return TestResult.failed("module-level SECRET_KEY assignment not found")
+
+    # A token signed with the insecure default must not verify.
+    import jwt as pyjwt
+    forged = pyjwt.encode(
+        {"userId": "attacker", "type": "access-token", "jti": "x",
+         "loginId": "x", "isAdmin": True, "exp": 4102444800},
+        insecure, algorithm="HS256",
+    )
+    if jwt_mod.verify_access_token(forged) is not None:
+        return TestResult.failed("forged default-secret token was accepted")
+    return TestResult.passed("JWT secret sourced from Settings; forged tokens rejected ✓")
+
+
 TESTS: list[PhaseTest] = [
     PhaseTest(id="R-001", name="checkpoints real auth import",
               description="C-1: dep from app.routes.auth, not app.auth.service",
@@ -347,7 +501,7 @@ TESTS: list[PhaseTest] = [
               description="H-4: engine disposal actually executes at shutdown",
               run=_test_close_db_sync, critical=False, tags=["infra"]),
     PhaseTest(id="R-007", name="retrieval offloaded from event loop",
-              description="H-1: agent retrieval + Tavily via asyncio.to_thread",
+              description="H-1: agent retrieval on the dedicated pool, Tavily via to_thread",
               run=_test_retrieval_offloaded, critical=True, tags=["performance"]),
     PhaseTest(id="R-008", name="HIL truly interrupts",
               description="H-2: NodeInterrupt raised; approve/reject honored",
@@ -364,4 +518,13 @@ TESTS: list[PhaseTest] = [
     PhaseTest(id="R-012", name="timezone-aware auth datetimes",
               description="Improvement 3: no datetime.utcnow in auth path",
               run=_test_no_utcnow_in_auth, critical=False, tags=["hygiene"]),
+    PhaseTest(id="R-013", name="branch seeds real state",
+              description="Branch copies checkpoint state onto an independent thread",
+              run=_test_branch_seeds_state, critical=True, tags=["checkpoint"]),
+    PhaseTest(id="R-014", name="checkpoint list excludes sub-graph namespaces",
+              description="Only root-namespace checkpoints are replay/branch addressable",
+              run=_test_checkpoint_list_root_only, critical=False, tags=["checkpoint"]),
+    PhaseTest(id="R-016", name="JWT secret not forgeable",
+              description="Auth signs with validated Settings secret, never the public default",
+              run=_test_jwt_secret_not_forgeable, critical=True, tags=["security", "auth"]),
 ]

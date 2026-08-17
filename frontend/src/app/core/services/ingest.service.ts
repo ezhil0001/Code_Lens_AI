@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import { environment } from '../../../environments/environment';
 
 /**
  * IngestService
@@ -10,9 +11,15 @@ import { Observable } from 'rxjs';
   providedIn: 'root'
 })
 export class IngestService {
-  private apiUrl = 'http://localhost:8000/api/v1';
+  private apiUrl = `${environment.apiUrl}/api/v1`;
 
   constructor(private http: HttpClient) { }
+
+  /** Ingest endpoints are authenticated; attach the stored bearer token. */
+  private authHeaders(): Record<string, string> {
+    const token = localStorage.getItem('auth_token');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
 
   /**
    * Upload and ingest document files
@@ -26,6 +33,7 @@ export class IngestService {
     });
 
     return this.http.post(`${this.apiUrl}/ingest/documents`, formData, {
+      headers: this.authHeaders(),
       reportProgress: true,
       responseType: 'json'
     });
@@ -37,7 +45,9 @@ export class IngestService {
    * @returns Observable with ingestion status
    */
   ingestFromUrl(url: string): Observable<any> {
-    return this.http.post(`${this.apiUrl}/ingest/url`, { url });
+    return this.http.post(`${this.apiUrl}/ingest/url`, { url }, {
+      headers: this.authHeaders(),
+    });
   }
 
   /**
@@ -45,7 +55,9 @@ export class IngestService {
    * @returns Observable with status information
    */
   getIngestionStatus(): Observable<any> {
-    return this.http.get(`${this.apiUrl}/ingest/status`);
+    return this.http.get(`${this.apiUrl}/ingest/status`, {
+      headers: this.authHeaders(),
+    });
   }
 
   /**
@@ -53,6 +65,8 @@ export class IngestService {
    * @returns Observable with clear status
    */
   clearDocuments(): Observable<any> {
-    return this.http.delete(`${this.apiUrl}/ingest/clear`);
+    return this.http.delete(`${this.apiUrl}/ingest/clear`, {
+      headers: this.authHeaders(),
+    });
   }
 }

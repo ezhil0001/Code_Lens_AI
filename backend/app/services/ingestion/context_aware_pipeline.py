@@ -1095,18 +1095,26 @@ class ContextAwareIngestionPipeline:
             Dictionary with ingestion status
         """
         try:
-            from app.services.ingestion.chroma_vector_store import ChromaVectorStore
-            
-            vector_store = ChromaVectorStore(
-                persist_directory=self.persist_directory,
-            )
-            
+            from app.services.ingestion.ingestion_service import IngestionService
+
+            collection = IngestionService.get_chroma_collection()
+            metadatas = (collection.get(include=["metadatas"]).get("metadatas")) or []
+            sources = {
+                (m or {}).get("source")
+                for m in metadatas
+                if (m or {}).get("source")
+            }
+            chunk_count = collection.count()
+
             return {
                 "status": "ready",
-                "documents_indexed": 0,
-                "total_chunks": 0,
-                "num_collections": 0,
-                "vector_store": vector_store.get_statistics() if hasattr(vector_store, 'get_statistics') else {}
+                "documents_indexed": len(sources),
+                "total_chunks": chunk_count,
+                "num_collections": 1,
+                "vector_store": {
+                    "collection_name": collection.name,
+                    "document_count": chunk_count,
+                },
             }
         except Exception as e:
             logger.error(f"Error getting status: {str(e)}")

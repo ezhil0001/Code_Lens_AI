@@ -25,9 +25,11 @@ logger = logging.getLogger(__name__)
 
 # Defaults must match ContextAwareIngestionPipeline + the ingest route
 PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-DEFAULT_COLLECTION = os.getenv(
-    "CHROMA_DEFAULT_COLLECTION", "codelens_ingestion"
-)
+
+# Single collection that holds the whole corpus. Historically each ingest run
+# created its own `documents_<timestamp>` collection and retrieval only ever
+# opened the newest one, which silently orphaned every earlier upload.
+CANONICAL_COLLECTION = os.getenv("CHROMA_CANONICAL_COLLECTION", "documents_main")
 
 
 class IngestionService:
@@ -52,32 +54,68 @@ class IngestionService:
     ):
         """Return the live ChromaDB collection.
 
-        If `collection_name` is None, picks the most recently created
-        `documents_*` collection or falls back to DEFAULT_COLLECTION.
+        If `collection_name` is None, returns the canonical corpus collection
+        so that reads and writes always address the full document set.
         """
         client = cls._get_client()
-        target = collection_name
-
-        if target is None:
-            try:
-                cols = client.list_collections()
-                doc_cols = sorted(
-                    [c.name for c in cols if c.name.startswith("documents_")],
-                    reverse=True,
-                )
-                target = doc_cols[0] if doc_cols else DEFAULT_COLLECTION
-            except Exception as e:
-                logger.warning(f"Could not list collections: {e}")
-                target = DEFAULT_COLLECTION
+        target = collection_name or CANONICAL_COLLECTION
 
         collection = client.get_or_create_collection(
             name=target, metadata={"hnsw:space": "cosine"}
         )
+
+        # First run after the fragmentation fix: pull legacy per-upload
+        # collections into the canonical one so old uploads stay searchable.
+        if collection_name is None and collection.count() == 0:
+            cls.consolidate_legacy_collections(collection)
+
         logger.info(
             f"Loaded ChromaDB collection '{target}' "
             f"({collection.count()} vectors)"
         )
         return collection
+
+    @classmethod
+    def consolidate_legacy_collections(cls, target) -> int:
+        """Copy every `documents_*` collection into `target`. Returns the
+        number of vectors merged."""
+        client = cls._get_client()
+        merged = 0
+        try:
+            names = [
+                c.name
+                for c in client.list_collections()
+                if c.name.startswith("documents_") and c.name != target.name
+            ]
+        except Exception as e:
+            logger.warning(f"Could not list collections for consolidation: {e}")
+            return 0
+
+        for name in sorted(names):
+            try:
+                src = client.get_collection(name)
+                if src.count() == 0:
+                    continue
+                data = src.get(include=["documents", "metadatas", "embeddings"])
+                ids = data.get("ids") or []
+                if not ids:
+                    continue
+                # Namespace the IDs so identical chunk IDs from different
+                # uploads cannot collide inside the canonical collection.
+                target.upsert(
+                    ids=[f"{name}::{i}" for i in ids],
+                    documents=data.get("documents"),
+                    metadatas=data.get("metadatas"),
+                    embeddings=data.get("embeddings"),
+                )
+                merged += len(ids)
+                logger.info(f"Consolidated {len(ids)} vectors from '{name}'")
+            except Exception as e:
+                logger.warning(f"Could not consolidate '{name}': {e}")
+
+        if merged:
+            logger.info(f"Consolidated {merged} vectors into '{target.name}'")
+        return merged
 
     # ------------------------------------------------------------------ #
     # BM25 documents                                                      #

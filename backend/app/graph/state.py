@@ -35,6 +35,13 @@ from typing import Annotated, Any, Dict, List, Optional, Sequence
 from langchain_core.messages import BaseMessage
 
 
+# Sentinel written once per request by the API layer. The graph reuses one
+# checkpointed thread per session, so without an explicit reset the merge
+# reducers below would carry a previous turn's agent answers, chunks and
+# sources into the next question.
+RESET = "__reset__"
+
+
 def _merge_agent_responses(existing: dict, update: dict) -> dict:
     """
     Merge reducer for agent_responses.
@@ -49,6 +56,10 @@ def _merge_agent_responses(existing: dict, update: dict) -> dict:
     If two branches write the same agent key (shouldn't happen in practice),
     the later write wins, matching normal last-write-wins expectation.
     """
+    if update == RESET:
+        return {}
+    if existing == RESET:
+        existing = {}
     return {**existing, **update}
 
 
@@ -102,6 +113,10 @@ def _merge_chunk_lists(existing: list, update: list) -> list:
     exact duplicates (chunks are unhashable dicts, so we dedup by a stable
     content key) while preserving first-occurrence order.
     """
+    if update == RESET:
+        return []
+    if existing == RESET:
+        existing = []
     existing = existing or []
     update = update or []
     merged: list = []
@@ -194,6 +209,9 @@ class AgentState(dict):
     pii_scrubbed_query: Optional[str]
 
     # ── HIL (Human-in-the-Loop) ───────────────────────────────────────────────
+    # Set from the request; the client's toggle/threshold used to be discarded.
+    hil_enabled: bool
+    hil_confidence_threshold: Optional[float]
     hil_required: bool
     hil_reason: Optional[str]
     hil_human_input: Optional[str]
@@ -209,6 +227,7 @@ class AgentState(dict):
     # ── Observability ─────────────────────────────────────────────────────────
     span_id: Optional[str]
     langfuse_trace_id: Optional[str]     # deterministic trace id for eval scoring
+    langfuse_parent_span_id: Optional[str]  # request root observation id
     graph_checkpoint_id: Optional[str]   # renamed: 'checkpoint_id' is reserved by LangGraph
     # dedup-merge: parallel agents each read + extend the list; combine without duplication
     nodes_visited: Annotated[List[str], _merge_nodes_visited]
@@ -246,13 +265,13 @@ def make_initial_state(
         "metadata_filter": None,
 
         # Retrieval
-        "retrieved_chunks": [],
-        "reranked_chunks": [],
-        "rerank_scores": [],
+        "retrieved_chunks": RESET,
+        "reranked_chunks": RESET,
+        "rerank_scores": RESET,
         "parent_contexts": {},
 
         # Agent outputs
-        "agent_responses": {},
+        "agent_responses": RESET,
         "active_agent": None,
         "tool_calls": [],
         "tool_results": [],
@@ -269,19 +288,22 @@ def make_initial_state(
 
         # HIL
         "hil_required": False,
+        "hil_enabled": False,
+        "hil_confidence_threshold": None,
         "hil_reason": None,
         "hil_human_input": None,
         "hil_approved": None,
 
         # Final response
         "final_response": None,
-        "sources": [],
+        "sources": RESET,
         "cache_hit": False,
         "evaluation_queued": False,
 
         # Observability
         "span_id": None,
         "langfuse_trace_id": None,
+        "langfuse_parent_span_id": None,
         "graph_checkpoint_id": None,
         "nodes_visited": [],
         "total_latency_ms": 0.0,

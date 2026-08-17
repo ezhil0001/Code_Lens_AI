@@ -1,17 +1,15 @@
 """Langfuse HTTP tracing middleware — one trace per inbound request.
 
-The streaming chat endpoint (``/api/v2/chat/stream``) is **excluded**: the
-LangGraph ``CallbackHandler`` already creates its trace with the full node
-hierarchy, and wrapping it here would produce duplicate root traces.ngfuse HTTP tracing middleware — one trace per inbound request.
+The streaming chat endpoint (``/api/v2/chat/stream``) is **excluded**: it opens
+its own ``chat.supervisor`` root observation and attaches the LangGraph
+``CallbackHandler`` to it, so wrapping it here would produce a duplicate root
+trace. Every other HTTP request (auth, history, cache, sessions, curate,
+feedback) is traced here.
 
-Chat requests (``/api/chat*``, ``/api/v2/chat*``) are **excluded**: the
-LangGraph ``CallbackHandler`` already creates their trace with the full node
-hierarchy, and wrapping them here would produce duplicate root traces.
-
-For every other HTTP request this middleware opens a root span capturing
-method, path, status code, latency, user context (when resolvable from
-request.state), environment, and error details. It degrades to a pure
-pass-through when Langfuse is disabled. Never breaks request handling.
+For those requests this middleware opens a root span capturing method, path,
+status code, latency, user context (when resolvable from request.state),
+environment, and error details. It degrades to a pure pass-through when
+Langfuse is disabled. Never breaks request handling.
 """
 
 from __future__ import annotations
@@ -30,6 +28,10 @@ logger = logging.getLogger(__name__)
 # streaming chat endpoint mints its own trace via _attach_langfuse(); wrapping
 # it here would create a duplicate root trace (one request = one trace).
 _SKIP_PREFIXES = ("/api/v2/chat/stream",)
+# The HIL resume endpoint continues the *originating* request's trace instead of
+# minting one, so tracing it here produced a stray "HTTP POST .../resume" trace
+# alongside the real one. The session id is dynamic, so match on the suffix.
+_SKIP_SUFFIXES = ("/resume",)
 # Noise endpoints not worth tracing.
 _IGNORE_PREFIXES = ("/health", "/docs", "/openapi.json", "/redoc", "/favicon")
 
@@ -39,7 +41,11 @@ class LangfuseHTTPMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
-        if path.startswith(_SKIP_PREFIXES) or path.startswith(_IGNORE_PREFIXES):
+        if (
+            path.startswith(_SKIP_PREFIXES)
+            or path.startswith(_IGNORE_PREFIXES)
+            or path.endswith(_SKIP_SUFFIXES)
+        ):
             return await call_next(request)
 
         try:

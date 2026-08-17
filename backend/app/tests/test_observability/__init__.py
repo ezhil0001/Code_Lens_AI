@@ -1,5 +1,5 @@
 """
-Tests for runtime observability — Langfuse tracing and OpenTelemetry (Jaeger).
+Tests for runtime observability — Langfuse tracing and evaluation.
 
 The observability modules are import-checked at startup so a broken public
 API surface (e.g. a renamed callback or an unimportable evaluator) is caught

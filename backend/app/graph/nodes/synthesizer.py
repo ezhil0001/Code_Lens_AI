@@ -25,8 +25,30 @@ logger = logging.getLogger(__name__)
 # Helper
 # ─────────────────────────────────────────────────────────────────────────────
 
+def sanitise_source_path(value: Any) -> Any:
+    """Reduce a source path to its basename.
+
+    Ingested files land in a server temp dir, so the raw metadata path is an
+    absolute host path (``/private/var/folders/.../T/tmpXXXX/SQL.pdf``). That
+    was rendered verbatim in the chat UI, disclosing the server filesystem
+    layout and the temp-dir naming scheme to every client.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if "/" not in value and "\\" not in value:
+        return value
+    return value.replace("\\", "/").rstrip("/").split("/")[-1] or value
+
+
+_SOURCE_PATH_KEYS = ("file_path", "source", "source_file", "path", "filename")
+
+
 def deduplicate_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Return sources with duplicate 'id' fields removed (first-occurrence wins)."""
+    """Return sources with duplicate 'id' fields removed (first-occurrence wins).
+
+    Also strips absolute host paths — this is the single boundary every agent's
+    sources pass through before reaching the client.
+    """
     seen: set[str] = set()
     deduped: List[Dict[str, Any]] = []
     for src in sources:
@@ -34,6 +56,18 @@ def deduplicate_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if src_id and src_id in seen:
             continue
         seen.add(src_id)
+        if isinstance(src, dict):
+            src = dict(src)
+            for key in _SOURCE_PATH_KEYS:
+                if key in src:
+                    src[key] = sanitise_source_path(src[key])
+            meta = src.get("metadata")
+            if isinstance(meta, dict):
+                meta = dict(meta)
+                for key in _SOURCE_PATH_KEYS:
+                    if key in meta:
+                        meta[key] = sanitise_source_path(meta[key])
+                src["metadata"] = meta
         deduped.append(src)
     return deduped
 

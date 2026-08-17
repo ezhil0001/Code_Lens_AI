@@ -2,8 +2,8 @@
 LangGraph Runtime Instrumentation
 ===================================
 Automatic OTEL span injection for every LangGraph node, without requiring
-individual nodes to import this module. Traces are exported to Jaeger, and
-LLM-level tracing / evaluation is handled by Langfuse.
+individual nodes to import this module. Spans surface in Langfuse, which also
+handles LLM-level tracing and evaluation.
 
 Two integration paths are provided so callers can choose the right trade-off
 between explicitness and convenience:

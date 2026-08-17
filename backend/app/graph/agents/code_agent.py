@@ -146,8 +146,7 @@ async def code_retrieve_node(state: dict, config: RunnableConfig = None) -> dict
         # transformer inference at the same time — MPS is not thread-safe and
         # concurrent inference deadlocks the whole request.
         hybrid = retriever.hybrid_retriever
-        from app.core.database import get_retrieval_lock
-        _lock = get_retrieval_lock()
+        from app.core.database import run_retrieval
 
         try:
             from app.core.database import get_code_embedder
@@ -165,29 +164,28 @@ async def code_retrieve_node(state: dict, config: RunnableConfig = None) -> dict
             keep nesting under the request trace.
             """
             nonlocal_code_emb = _code_emb
-            with _lock:
-                _prev_emb = hybrid.vector_retriever.embeddings if nonlocal_code_emb else None
-                if nonlocal_code_emb:
-                    try:
-                        hybrid.vector_retriever.embeddings = nonlocal_code_emb
-                    except Exception:
-                        nonlocal_code_emb = None  # retriever is immutable — skip swap
+            _prev_emb = hybrid.vector_retriever.embeddings if nonlocal_code_emb else None
+            if nonlocal_code_emb:
                 try:
-                    return retriever.retrieve(
-                        query=query,
-                        top_k=10,
-                        metadata_filter=metadata_filter,
-                    )
-                finally:
-                    # Always restore the original embedder before releasing the lock
-                    if nonlocal_code_emb and _prev_emb is not None:
-                        try:
-                            hybrid.vector_retriever.embeddings = _prev_emb
-                        except Exception:  # noqa: BLE001
-                            logger.error("[code_retrieve_node] embedder restore FAILED — general embedder may be replaced")
+                    hybrid.vector_retriever.embeddings = nonlocal_code_emb
+                except Exception:
+                    nonlocal_code_emb = None  # retriever is immutable — skip swap
+            try:
+                return retriever.retrieve(
+                    query=query,
+                    top_k=10,
+                    metadata_filter=metadata_filter,
+                )
+            finally:
+                # Always restore the original embedder before releasing the lock
+                if nonlocal_code_emb and _prev_emb is not None:
+                    try:
+                        hybrid.vector_retriever.embeddings = _prev_emb
+                    except Exception:  # noqa: BLE001
+                        logger.error("[code_retrieve_node] embedder restore FAILED — general embedder may be replaced")
 
         import asyncio
-        result = await asyncio.to_thread(_retrieve_with_code_embedder)
+        result = await run_retrieval(_retrieve_with_code_embedder)
 
         chunks = result.chunks if result else []
         logger.info("[code_retrieve_node] retrieved %d chunks (code embedder)", len(chunks))
@@ -212,7 +210,15 @@ async def code_rerank_node(state: dict, config: RunnableConfig = None) -> dict:
         reranker = getattr(factory, "get_reranker", None)
         if reranker and chunks:
             # rerank() returns a (docs, scores) tuple
-            result = factory.get_reranker().rerank(query=query, documents=chunks, top_k=5)
+            # Cross-encoder inference is CPU-bound and takes seconds on
+            # ~20 candidates. Running it inline blocked the event loop, so
+            # /api/health returned 000 under concurrent load. Offload it to the
+            # bounded retrieval pool like every other model call.
+            from app.core.database import run_retrieval
+            _reranker = factory.get_reranker()
+            result = await run_retrieval(
+                lambda: _reranker.rerank(query=query, documents=chunks, top_k=5)
+            )
             if isinstance(result, tuple):
                 reranked, scores = result[0], list(result[1] or [])
             else:
@@ -285,7 +291,11 @@ async def code_generate_node(state: dict, config: RunnableConfig = None) -> dict
         # Prefer parent context (full function body) when available
         full_content = parent_ctx.get(chunk_id, content)
         metadata = chunk.get("metadata", {})
-        file_path = metadata.get("file_path", metadata.get("source", "unknown"))
+        from app.graph.nodes.synthesizer import sanitise_source_path
+        # Never expose the server's absolute ingest path to a client.
+        file_path = sanitise_source_path(
+            metadata.get("file_path", metadata.get("source", "unknown"))
+        )
         context_parts.append(
             f"### Source {i + 1}: {file_path}\n```\n{full_content[:MAX_CHARS_PER_SOURCE]}\n```"
         )
@@ -343,12 +353,13 @@ async def code_generate_node(state: dict, config: RunnableConfig = None) -> dict
                     chunks.append(piece)
             response_text = "".join(chunks) or "[CodeAgent: empty response]"
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[code_generate_node] LLM call failed: %s", exc)
-        if context_parts:
-            response_text = (
-                f"Based on the codebase, here is the relevant context for '{query}':\n\n"
-                + context_text[:2000]
-            )
+        logger.error("[code_generate_node] LLM call failed: %s", exc, exc_info=True)
+        # Dumping raw retrieved chunks here read as a confident answer while
+        # actually being unrelated corpus text. Say the answer is unavailable.
+        response_text = (
+            "I couldn't generate an answer just now — the language model was "
+            "unavailable. Relevant sources are listed below; please retry."
+        )
 
     agent_responses = dict(state.get("agent_responses", {}))
     agent_responses["CodeAgent"] = response_text

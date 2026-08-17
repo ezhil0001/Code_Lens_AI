@@ -42,8 +42,7 @@ CREATE INDEX IF NOT EXISTS ltm_user_idx
 CREATE_EMBEDDING_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS ltm_embedding_idx
     ON agent_long_term_memory
-    USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+    USING hnsw (embedding vector_cosine_ops);
 """
 
 # ── Migration runner ──────────────────────────────────────────────────────────
@@ -78,7 +77,7 @@ def run_migration_sync() -> bool:
             try:
                 conn.execute(CREATE_EMBEDDING_INDEX_SQL)
                 conn.commit()
-                logger.info("[LTM migration] ivfflat embedding index created/verified")
+                logger.info("[LTM migration] hnsw embedding index created/verified")
             except Exception as idx_exc:  # noqa: BLE001
                 # ivfflat requires data rows to build — non-fatal on empty table
                 logger.warning("[LTM migration] ivfflat index skipped (needs rows): %s", idx_exc)

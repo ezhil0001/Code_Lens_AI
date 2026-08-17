@@ -37,7 +37,12 @@ _OWNERS_TTL_S = 24 * 3600.0
 
 
 def register_trace_owner(trace_id: Optional[str], user_id: Optional[str]) -> None:
-    """Record which user a trace belongs to. Never raises."""
+    """Record which user a trace belongs to. Never raises.
+
+    Mirrors into ``app.observability.tracing``'s registry, which is what the
+    ``/feedback`` endpoint reads. Keeping two independent registries meant a
+    trace registered here was rejected there as "Unknown trace".
+    """
     if not trace_id or not user_id:
         return
     try:
@@ -47,6 +52,11 @@ def register_trace_owner(trace_id: Optional[str], user_id: Optional[str]) -> Non
             _OWNERS.move_to_end(trace_id)
             while len(_OWNERS) > _OWNERS_MAX:
                 _OWNERS.popitem(last=False)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.observability.tracing import register_trace_owner as _register
+        _register(trace_id, user_id)
     except Exception:  # noqa: BLE001
         pass
 

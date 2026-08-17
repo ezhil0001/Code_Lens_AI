@@ -421,11 +421,17 @@ async def _test_all_endpoints_authenticated() -> TestResult:
 
 
 async def _test_cache_write_offloaded_to_thread() -> TestResult:
-    """Z-2: blocking cache I/O is offloaded via asyncio.to_thread.
+    """Z-2: blocking cache I/O is offloaded to the bounded retrieval pool.
 
     Static guard: both the cache lookup (chat_stream_v2) and the cache write
-    (_graph_stream_v2) must be wrapped in asyncio.to_thread so the event loop
-    is never blocked by the ~300ms synchronous embed+pgvector calls.
+    (_graph_stream_v2) must run off the event loop — the ~300ms synchronous
+    embed+pgvector calls would otherwise block it.
+
+    They must use ``run_retrieval`` (the dedicated bounded pool), NOT
+    ``asyncio.to_thread``. Both are model inference, and /api/health also uses
+    asyncio.to_thread: with N concurrent requests embedding on the 12-thread
+    default executor, health could not obtain a worker and returned 000 under
+    load (7/10 probes failed before this change).
     """
     import inspect
     mod, err = _try_import("app.api.chat")
@@ -433,11 +439,15 @@ async def _test_cache_write_offloaded_to_thread() -> TestResult:
         return TestResult.skipped("app.api.chat not importable")
     get_src = inspect.getsource(mod.chat_stream_v2)
     write_src = inspect.getsource(mod._graph_stream_v2)
-    if "to_thread(semantic_cache.get" not in get_src:
-        return TestResult.failed("cache GET not offloaded to thread (event-loop blocking)")
-    if "to_thread(_cache_write" not in write_src:
-        return TestResult.failed("cache WRITE not offloaded to thread (event-loop blocking)")
-    return TestResult.passed("Cache GET + WRITE offloaded via asyncio.to_thread — Z-2 ✓")
+    if "run_retrieval(" not in get_src or "semantic_cache.get" not in get_src:
+        return TestResult.failed("cache GET not offloaded to the bounded retrieval pool")
+    if "to_thread(semantic_cache.get" in get_src:
+        return TestResult.failed("cache GET still on the default executor (starves /api/health)")
+    if "run_retrieval(" not in write_src or "_cache_write" not in write_src:
+        return TestResult.failed("cache WRITE not offloaded to the bounded retrieval pool")
+    if "to_thread(_cache_write" in write_src:
+        return TestResult.failed("cache WRITE still on the default executor (starves /api/health)")
+    return TestResult.passed("Cache GET + WRITE offloaded to the bounded retrieval pool — Z-2 ✓")
 
 
 async def _test_cache_write_once_on_completion() -> TestResult:
@@ -495,6 +505,55 @@ async def _test_cache_eviction_and_dedup() -> TestResult:
     return TestResult.passed("Cache dedup + lazy TTL eviction present — Z-4 ✓")
 
 
+async def _test_done_event_carries_sources() -> TestResult:
+    """G-018: the terminal `done` event must carry retrieval sources.
+
+    The agents build a sanitised `sources` list in graph state and the online
+    evaluator scores `citation_quality` from it, but nothing ever sent it to
+    the client — so the entire citations UI stayed empty in the browser.
+    """
+    import inspect
+
+    from app.graph import streaming as st
+
+    collect = getattr(st, "_collect_sources", None)
+    if not callable(collect):
+        return TestResult.failed("streaming._collect_sources missing")
+
+    src = inspect.getsource(st.stream_graph_events)
+    if "_collect_sources(snapshot)" not in src:
+        return TestResult.failed("done event does not include sources")
+
+    class _Snap:
+        values = {
+            "sources": [
+                {"id": "1", "file_path": "app/services/retrieval/retriever_engine.py",
+                 "score": 0.91234567, "content": "x" * 900},
+                {"id": "2", "file_path": "app/services/retrieval/retriever_engine.py",
+                 "score": 0.4, "content": "dup path"},
+                {"id": "3", "file_path": "app/graph/nodes/synthesizer.py", "score": 0.5,
+                 "content": "y"},
+                "not-a-dict",
+            ]
+        }
+
+    out = collect(_Snap())
+    if len(out) != 2:
+        return TestResult.failed(f"expected 2 deduped sources, got {len(out)}")
+    if out[0]["file_path"].startswith("/"):
+        return TestResult.failed("absolute server path leaked into citation")
+    if len(out[0]["snippet"]) > 400:
+        return TestResult.failed("snippet not truncated")
+    if out[0]["score"] != 0.9123:
+        return TestResult.failed(f"score not rounded: {out[0]['score']}")
+
+    # Must never raise, whatever the snapshot looks like.
+    for bad in (None, object(), type("S", (), {"values": None})()):
+        if collect(bad) != []:
+            return TestResult.failed("collect_sources not fail-safe")
+    return TestResult.passed("done event carries deduped, sanitised, bounded sources ✓")
+
+
 TESTS: list[PhaseTest] = [
     PhaseTest(id="G-001", name="v2 chat router importable",
               description="app.api.chat.router_v2 found",
@@ -539,7 +598,7 @@ TESTS: list[PhaseTest] = [
               description="Z-1: real auth dependency on every state endpoint (no anon stub)",
               run=_test_all_endpoints_authenticated, critical=True, tags=["api", "security"]),
     PhaseTest(id="G-015", name="blocking cache I/O offloaded to thread",
-              description="Z-2: cache GET + WRITE via asyncio.to_thread (loop non-blocking)",
+              description="Z-2: cache GET + WRITE on the bounded retrieval pool (loop non-blocking)",
               run=_test_cache_write_offloaded_to_thread, critical=True, tags=["streaming", "cache"]),
     PhaseTest(id="G-016", name="complete response cached exactly once",
               description="Z-3: done event → single cache write",
@@ -547,4 +606,7 @@ TESTS: list[PhaseTest] = [
     PhaseTest(id="G-017", name="cache dedup + lazy TTL eviction",
               description="Z-4: bounded cache growth via dedup + expiry sweep",
               run=_test_cache_eviction_and_dedup, critical=True, tags=["cache"]),
+    PhaseTest(id="G-018", name="done event carries sources",
+              description="Citations reach the client: sanitised, deduped, bounded",
+              run=_test_done_event_carries_sources, critical=True, tags=["streaming", "rag"]),
 ]

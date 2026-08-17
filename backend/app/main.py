@@ -52,6 +52,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Bound CPU oversubscription before torch is imported by any model code.
+# Default torch intra-op threads (4) x retrieval workers (2) already saturates
+# an 8-core box; the event loop then cannot get GIL time and /api/health times
+# out under concurrent load. Reserve headroom for the loop.
+try:
+    import torch as _torch
+
+    _cores = os.cpu_count() or 4
+    _workers = int(os.getenv("RETRIEVAL_MAX_WORKERS", "2"))
+    # Leave at least a quarter of the cores for the event loop and I/O threads.
+    _per_worker = max(1, (_cores - max(1, _cores // 4)) // max(1, _workers))
+    _torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", str(_per_worker))))
+    logger.info(
+        f"✓ Inference threads bounded: {_workers} retrieval workers x "
+        f"{_torch.get_num_threads()} torch threads on {_cores} cores"
+    )
+except Exception as _e:  # noqa: BLE001
+    logger.warning(f"could not bound torch threads: {_e}")
+
+# Diagnostics: `kill -USR1 <pid>` dumps every thread's stack to stderr (the
+# server log). This is the supported way to diagnose a wedged event loop or a
+# thread-pool deadlock on macOS, where py-spy requires root.
+try:
+    import faulthandler
+    import signal
+
+    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+    logger.info("✓ Thread-dump diagnostics enabled (kill -USR1 <pid>)")
+except Exception as _e:  # noqa: BLE001
+    logger.warning(f"thread-dump diagnostics unavailable: {_e}")
+
 # Silence noisy psycopg connection-pool retries when Postgres isn't
 # reachable locally (expected in dev — the pool operates in disabled mode).
 logging.getLogger("psycopg.pool").setLevel(logging.ERROR)
@@ -178,6 +209,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"checkpointer pool close failed: {e}")
 
+    # Stop RAGAS evaluation workers so they cannot outlive the process.
+    try:
+        from app.graph.supervisor_graph import shutdown_eval_executor
+        shutdown_eval_executor()
+    except Exception as e:
+        logger.warning(f"evaluation executor shutdown failed: {e}")
+
+    # Stop the dedicated retrieval workers.
+    try:
+        from app.core.database import close_retrieval_executor
+        close_retrieval_executor()
+    except Exception as e:
+        logger.warning(f"retrieval executor shutdown failed: {e}")
+
     # Flush any buffered Langfuse traces before the process exits.
     try:
         from app.observability.langfuse_client import shutdown as langfuse_shutdown
@@ -204,8 +249,8 @@ app = FastAPI(
 # ==================== Middleware Stack ====================
 
 # Observability is handled by Langfuse (LLM tracing, span-level latency,
-# token/cost tracking, and online evaluation) plus OpenTelemetry traces
-# exported to Jaeger. No in-process metrics middleware is required.
+# token/cost tracking, and online evaluation). No in-process metrics
+# middleware is required.
 
 # Add logging middleware (tracks all requests/responses)
 app.add_middleware(LoggingMiddleware)

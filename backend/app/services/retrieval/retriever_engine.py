@@ -296,12 +296,14 @@ class RerankingEngine:
                 metadata={"service": "RerankingEngine", "model": getattr(self, "model_name", "BAAI/bge-reranker-base")},
             ) as _s:
                 pairs = [[query, doc.get("content", "")] for doc in documents]
-                scores = self.cross_encoder.predict(
-                    pairs,
-                    convert_to_numpy=True,
-                    show_progress_bar=False,
-                    batch_size=32,   # CPU-la 32 optimal — MPS overhead illa
-                )
+                from app.core.database import get_reranker_lock
+                with get_reranker_lock():
+                    scores = self.cross_encoder.predict(
+                        pairs,
+                        convert_to_numpy=True,
+                        show_progress_bar=False,
+                        batch_size=32,   # CPU-la 32 optimal — MPS overhead illa
+                    )
 
                 scored = list(zip(documents, scores.tolist()))
                 scored.sort(key=lambda x: x[1], reverse=True)
@@ -338,7 +340,7 @@ class RerankingEngine:
                 from app.observability.tracing import span as _lf_span
                 with _lf_span(
                     "reranker.fail_soft",
-                    kind="event",
+                    kind="span",
                     input={"candidates": len(documents), "top_k": top_k},
                     metadata={"service": "RerankingEngine", "fallback": "original-retrieval-order"},
                 ) as _fs:
@@ -386,7 +388,9 @@ class _ChromaCollectionRetriever(BaseRetriever):
                 input={"text_chars": len(query)},
                 metadata={"provider": "huggingface", "model": getattr(self.embeddings, "model_name", "unknown")},
             ) as _es:
-                query_embedding = self.embeddings.embed_query(query)
+                from app.core.database import get_embedding_lock
+                with get_embedding_lock():
+                    query_embedding = self.embeddings.embed_query(query)
                 _es.update(output={"dimensions": len(query_embedding)})
             query_kwargs: Dict[str, Any] = {
                 "query_embeddings": [query_embedding],
@@ -453,7 +457,9 @@ class _PgVectorRetriever(BaseRetriever):
                 input={"text_chars": len(query)},
                 metadata={"provider": "huggingface", "model": getattr(self.embeddings, "model_name", "unknown")},
             ) as _es:
-                query_embedding = self.embeddings.embed_query(query)
+                from app.core.database import get_embedding_lock
+                with get_embedding_lock():
+                    query_embedding = self.embeddings.embed_query(query)
                 _es.update(output={"dimensions": len(query_embedding)})
             results = self.store.query_similar(
                 query_embedding=query_embedding,

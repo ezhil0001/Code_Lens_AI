@@ -27,7 +27,8 @@ email-validator>=2.1.0
 
 # ==================== AI & LLM ====================
 langchain>=0.1.7
-langchain-community>=0.0.20
+# ragas imports langchain_community.chat_models.vertexai, removed in 0.4.x
+langchain-community>=0.3,<0.4
 langchain-openai>=0.1.0
 langchain-groq>=0.1.2
 langchain-huggingface>=0.0.39
@@ -116,26 +117,19 @@ hnswlib>=0.7.0  # HNSW for efficient similarity search
 tenacity>=8.2.0  # For retry logic
 tqdm>=4.65.0  # Progress bars
 
-# ==================== Phase 5: Observability & Evaluation ====================
+# ==================== Observability & Evaluation ====================
 
-# Langfuse — primary LLM observability & evaluation platform (self-hosted).
-# Traces every LLM/agent/retrieval span with token usage, cost, latency,
-# prompts/completions, and evaluation scores. See docker-compose.langfuse.yml.
-# Pinned to the tested major line (OTEL-based v3/v4 tracing API).
+# Langfuse — the observability & evaluation platform for this project
+# (self-hosted). Traces every LLM/agent/retrieval span with token usage, cost,
+# latency, prompts/completions, and evaluation scores. See
+# docker-compose.langfuse.yml. Pinned to the tested major line (OTEL-based
+# v3/v4 tracing API).
 langfuse>=3.0.0,<5
 
-# OpenTelemetry — distributed request/infra tracing exported to Jaeger.
+# OpenTelemetry API/SDK — the transport Langfuse's tracing is built on.
+# There is no separate exporter: spans go to Langfuse, not to a Jaeger backend.
 opentelemetry-api>=1.21.0
 opentelemetry-sdk>=1.21.0
-opentelemetry-exporter-jaeger>=1.21.0  # Jaeger tracing backend
-
-# OpenTelemetry Instrumentation
-opentelemetry-instrumentation>=0.42b0
-opentelemetry-instrumentation-fastapi>=0.42b0  # FastAPI auto-instrumentation
-opentelemetry-instrumentation-sqlalchemy>=0.42b0  # Database query tracing
-opentelemetry-instrumentation-psycopg2>=0.42b0  # PostgreSQL-specific instrumentation
-opentelemetry-instrumentation-httpx>=0.42b0  # HTTPX client instrumentation
-opentelemetry-instrumentation-requests>=0.42b0  # Requests library instrumentation
 
 # RAG Evaluation (Ragas)
 ragas>=0.1.1  # RAG evaluation framework (already in requirements, confirmed version)
@@ -143,3 +137,8 @@ datasets>=2.14.5  # Hugging Face datasets (already in requirements, confirmed ve
 
 # Local LLM Support (Ollama)
 ollama>=0.1.0  # Ollama Python client
+
+# Redis backs the JWT blacklist and rate limiter. Without it both
+# silently fall back to per-process in-memory stores, so logout does
+# not truly revoke a token and rate limits are not shared.
+redis>=5,<6

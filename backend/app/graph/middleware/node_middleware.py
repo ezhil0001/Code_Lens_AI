@@ -14,8 +14,8 @@ across every node:
   programming error (KeyError, AttributeError) is not silently swallowed.
 
   OTEL: emits a span per node execution with node_name and session_id
-  attributes exported to Jaeger. Per-node latency is also visible in
-  Langfuse traces without any additional instrumentation in the node itself.
+  attributes. Per-node latency is visible in Langfuse traces without any
+  additional instrumentation in the node itself.
 
 Usage:
     builder.add_node(

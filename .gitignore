@@ -35,12 +35,13 @@ htmlcov/
 *.swp
 *.swo
 
-# Scratch / debug scripts
-verify_pg.py
-backend/verify_pg.py
-
 # SQLite evaluation store (runtime artifact, not source)
 backend/evaluation_results.db
 
 # Interview notes (local only)
 Interview/
+
+# Virtual environments (any suffix, e.g. venv311)
+venv*/
+.venv*/
+**/venv*/

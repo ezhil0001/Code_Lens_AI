@@ -66,8 +66,17 @@ export class LoginComponent implements OnInit {
 
     console.log(`🔐 [LoginComponent] Attempting login for: ${email}`);
 
-    // Call backend login endpoint
-    this.http.post<{ token: string; user: any }>('http://localhost:8000/api/v1/auth/login', {
+    this.postLogin(email, password, false);
+  }
+
+  /**
+   * POST the credentials. `force` replaces an existing session on another
+   * device — the backend rejects a second login otherwise.
+   */
+  private postLogin(email: string, password: string, force: boolean): void {
+    const url = `${environment.apiUrl}/api/v1/auth/login${force ? '?force_login=true' : ''}`;
+
+    this.http.post<{ access_token: string; refresh_token?: string; user: any }>(url, {
       email,
       password,
     }).subscribe({
@@ -75,7 +84,7 @@ export class LoginComponent implements OnInit {
         console.log('✅ Login successful');
         
         // Store token in localStorage
-        localStorage.setItem('auth_token', response.token);
+        localStorage.setItem('auth_token', response.access_token);
         
         // Create session
         this.sessionService.createNewSession();
@@ -85,10 +94,22 @@ export class LoginComponent implements OnInit {
       },
       error: (error) => {
         console.error('❌ Login failed:', error);
+
+        const detail: string = error?.error?.detail ?? '';
+
+        if (error.status === 401 && !force && detail.includes('already logged in')) {
+          // Stale session on another device — take it over rather than
+          // locking the user out of their own account.
+          this.postLogin(email, password, true);
+          return;
+        }
+
         this.isLoading = false;
-        
+
         if (error.status === 401) {
           this.errorMessage = 'Invalid email or password';
+        } else if (error.status === 429) {
+          this.errorMessage = detail || 'Too many login attempts. Please wait and try again.';
         } else if (error.status === 0 && !environment.production) {
           // C-5: development-only offline login. NEVER reachable in
           // production builds — a backend outage must not grant a session.

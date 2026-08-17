@@ -205,6 +205,35 @@ class ChatMemoryManager:
         rendered.reverse()
         return "\n".join(rendered) if rendered else None
 
+    async def get_messages(self, session_id: str) -> list[dict]:
+        """Return history as ``[{role, content}]`` for API consumers.
+
+        ``get_history`` renders a single flattened string for prompt injection;
+        returning that from the REST endpoint put a str where the frontend
+        iterates message objects.
+        """
+        if not self._available:
+            return []
+
+        def _load_messages() -> list:
+            with self._checkout() as conn:
+                history = self._history_with(conn, session_id)
+                return list(history.messages)
+
+        try:
+            messages = await asyncio.to_thread(_load_messages)
+        except Exception as e:
+            logger.error(f"Failed to load messages for {session_id}: {e}")
+            return []
+
+        out: list[dict] = []
+        for m in messages:
+            role = "user" if isinstance(m, HumanMessage) else (
+                "assistant" if isinstance(m, AIMessage) else "system"
+            )
+            out.append({"role": role, "content": m.content})
+        return out
+
     async def clear(self, session_id: str) -> None:
         """Clear all messages for a session."""
         def _do_clear() -> None:

@@ -9,16 +9,27 @@ Node execution order:
   cache_check_node        → semantic cache lookup; hit → skip to response_node
   memory_read_node        → load STM window + LTM facts
   intent_classifier_node  → LLM routing; returns 1–2 agent names
+  hil_check_node          → SAFETY GATE: interrupt for human review BEFORE any
+                            answer is generated; reject skips agents entirely
   [agent nodes]           → dispatched in parallel via Send() for compound queries
   synthesizer_node        → merge outputs; single-agent is a pass-through
-  hil_check_node          → pause for human review if confidence is low
   output_guardrail_node   → code safety scan + PII leak scan + citation warnings
   response_node           → assemble final SSE payload, write to cache + memory
+
+Why the gate sits before the agents
+-----------------------------------
+It used to run after synthesizer_node. By then the agents and synthesiser had
+already produced *and streamed* the answer, so a "DROP TABLE users" request was
+delivered to the browser before the reviewer ever saw the banner, and the output
+guardrail could only annotate content the user had already read. Gating between
+classification and dispatch keeps both controls genuinely preventive: the
+classifier supplies routing_confidence for the low-confidence gate, and no
+answer-producing node has run yet.
 
 Parallel fan-out
 ----------------
 intent_classifier_node populates state["routing_agents"] with 1–2 agent names.
-dispatch_agents() reads that list and returns a list of Send() objects, one per
+route_after_hil() reads that list and returns a list of Send() objects, one per
 agent.  LangGraph executes all Send()s in the same superstep so two agents run
 concurrently.  Each agent writes its answer into agent_responses under its own
 key; the _merge_agent_responses reducer in AgentState combines the dicts so no
@@ -29,6 +40,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
 from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
@@ -131,20 +144,72 @@ def _current_langfuse_trace_id() -> Optional[str]:
         return None
 
 
-def _log_eval_future_result(fut: "Any") -> None:
-    """Done-callback for the background RAGAS evaluation future.
+_EVAL_TIMEOUT_SECONDS = float(os.getenv("RAGAS_EVAL_TIMEOUT_SECONDS", "180"))
+# Background evaluation shares the chat path's Groq quota. Each RAGAS sample
+# issues several judge calls, so running evaluations in parallel is what
+# actually triggers HTTP 429 — and a 429 there can starve real chat requests.
+# Evaluation is a background quality job with no latency requirement, so keep
+# it at one worker by default.
+_EVAL_MAX_WORKERS = int(os.getenv("RAGAS_EVAL_MAX_WORKERS", "1"))
+_eval_executor: "Any" = None
+_eval_inflight: set[str] = set()
+_eval_inflight_lock = threading.Lock()
 
-    Ensures exceptions raised inside the executor are logged instead of being
-    silently swallowed (C-1). Never raises.
+
+def _get_eval_executor():
+    """Dedicated bounded pool so RAGAS never starves the default executor."""
+    global _eval_executor
+    if _eval_executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _eval_executor = ThreadPoolExecutor(
+            max_workers=_EVAL_MAX_WORKERS, thread_name_prefix="ragas-eval"
+        )
+    return _eval_executor
+
+
+def shutdown_eval_executor(wait: bool = False) -> None:
+    """Release evaluation workers at process shutdown."""
+    global _eval_executor
+    if _eval_executor is not None:
+        _eval_executor.shutdown(wait=wait, cancel_futures=not wait)
+        _eval_executor = None
+
+
+async def _run_ragas_evaluation(evaluator: "Any", sample: "Any", dedupe_key: str) -> None:
+    """Run one RAGAS evaluation with a hard timeout and explicit outcome logs.
+
+    Scheduling failures used to be logged at DEBUG, so a broken evaluator
+    produced neither a success nor a failure line and looked like a hang.
     """
+    loop = asyncio.get_running_loop()
     try:
-        exc = fut.exception()
-    except Exception:  # noqa: BLE001  (future cancelled)
-        return
-    if exc is not None:
-        logger.warning("[RESPONSE_NODE] RAGAS evaluation failed in background: %s", exc)
-    else:
-        logger.debug("[RESPONSE_NODE] RAGAS evaluation completed")
+        result = await asyncio.wait_for(
+            loop.run_in_executor(_get_eval_executor(), evaluator.evaluate_sample, sample),
+            timeout=_EVAL_TIMEOUT_SECONDS,
+        )
+        if result is None:
+            logger.warning("[RAGAS] evaluation returned no result (sample skipped)")
+        else:
+            logger.info(
+                "[RAGAS] evaluation completed — faithfulness=%s answer_relevancy=%s "
+                "context_recall=%s",
+                getattr(result.metrics, "faithfulness", None),
+                getattr(result.metrics, "answer_relevancy", None),
+                getattr(result.metrics, "context_recall", None),
+            )
+    except asyncio.TimeoutError:
+        logger.error(
+            "[RAGAS] evaluation timed out after %.0fs — abandoning sample",
+            _EVAL_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        logger.warning("[RAGAS] evaluation cancelled")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[RAGAS] evaluation failed: %s", exc)
+    finally:
+        with _eval_inflight_lock:
+            _eval_inflight.discard(dedupe_key)
 
 
 
@@ -315,6 +380,15 @@ async def response_node(state: dict, config: RunnableConfig = None) -> dict:
         pass
     trace_id = trace_id or state.get("langfuse_trace_id") or _current_langfuse_trace_id()
 
+    # Root observation of this request, so background evaluation nests under
+    # "chat.supervisor" instead of becoming a second root in the same trace.
+    parent_span_id = None
+    try:
+        parent_span_id = ((config or {}).get("configurable") or {}).get("langfuse_parent_span_id")
+    except Exception:  # noqa: BLE001
+        pass
+    parent_span_id = parent_span_id or state.get("langfuse_parent_span_id")
+
     # F-4: evaluation runs exactly once per logical turn. On checkpoint resume
     # / replay the graph re-enters response_node with state that already has
     # evaluation_queued=True; skip re-scoring so we never publish duplicate
@@ -345,17 +419,24 @@ async def response_node(state: dict, config: RunnableConfig = None) -> dict:
             session_id=state.get("session_id", ""),
             source=state.get("intent", "HYBRID"),
             trace_id=trace_id,
+            parent_span_id=parent_span_id,
         )
         evaluator = RAGEvaluator.get_instance()
-        # C-1: evaluate_sample() is synchronous and does blocking RAGAS + judge
-        # LLM work. Run it off the event loop so streaming is never blocked, and
-        # log (not swallow) any failure via a done-callback.
-        loop = asyncio.get_running_loop()
-        eval_future = loop.run_in_executor(None, evaluator.evaluate_sample, sample)
-        eval_future.add_done_callback(_log_eval_future_result)
-        logger.debug("[RESPONSE_NODE] RAGAS evaluation scheduled (executor)")
+        # Dedupe on the trace (falls back to session+query) so a retried or
+        # resumed response cannot enqueue the same evaluation twice.
+        dedupe_key = trace_id or f"{state.get('session_id','')}::{hash(state.get('query',''))}"
+        with _eval_inflight_lock:
+            already_running = dedupe_key in _eval_inflight
+            if not already_running:
+                _eval_inflight.add(dedupe_key)
+        if already_running:
+            logger.info("[RAGAS] evaluation already in flight for %s — skipping duplicate", dedupe_key[:16])
+        else:
+            asyncio.create_task(_run_ragas_evaluation(evaluator, sample, dedupe_key))
+            logger.info("[RAGAS] evaluation scheduled (timeout=%.0fs)", _EVAL_TIMEOUT_SECONDS)
     except Exception as _eval_err:  # noqa: BLE001
-        logger.debug("[RESPONSE_NODE] RAGAS eval skipped: %s", _eval_err)
+        # Must never be DEBUG: a broken evaluator here is invisible otherwise.
+        logger.exception("[RAGAS] could not schedule evaluation: %s", _eval_err)
 
     # ── Online code-evaluator suite (deterministic, sub-ms, trace-linked) ─────
     # Publishes structure/citation/grounding/routing/guardrail scores onto the
@@ -458,12 +539,30 @@ def route_to_agent(state: dict) -> str:
 
 
 def route_hil(state: dict) -> str:
-    """After hil_check_node: interrupt → (graph pauses), else → output_guardrail."""
-    if state.get("hil_required", False):
-        # LangGraph handles the actual interrupt via interrupt_before at compile time.
-        # This edge is only reached when hil_required is False (normal path).
-        return "output_guardrail_node"
+    """Legacy router kept for callers/tests that import it directly.
+
+    The live graph uses :func:`route_after_hil`, which gates *before* any
+    answer is generated.
+    """
     return "output_guardrail_node"
+
+
+def route_after_hil(state: dict):
+    """Route out of ``hil_check_node``, which now runs BEFORE generation.
+
+    ``hil_check_node`` raises LangGraph's dynamic ``interrupt()`` when a
+    request needs review, so control only reaches this router once there is a
+    decision (or none was needed).
+
+    * rejected  → straight to the output guardrail; ``hil_check_node`` has
+      already put the safe refusal in ``final_response`` and **no agent runs**,
+      so no unsafe answer is ever generated.
+    * otherwise → the normal ``Send()`` fan-out to the selected agents.
+    """
+    if state.get("hil_approved") is False:
+        logger.info("[SUPERVISOR] HIL rejected — skipping agent generation")
+        return "output_guardrail_node"
+    return dispatch_agents(state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -529,14 +628,23 @@ def build_supervisor_graph(
 
     builder.add_edge("memory_read_node", "intent_classifier_node")
 
-    # Parallel fan-out: dispatch_agents() returns Send() objects so multiple
-    # agents can run in the same superstep for compound queries.
+    # Safety gate BEFORE any answer is produced. hil_check_node needs
+    # routing_confidence (set by the classifier) for its low-confidence gate,
+    # so it sits directly after classification and directly before dispatch.
+    # Running it after the synthesiser — as it used to — meant the agents and
+    # synthesiser had already generated AND streamed the answer, so neither the
+    # human review nor the output guardrail could prevent disclosure.
+    builder.add_edge("intent_classifier_node", "hil_check_node")
+
+    # Parallel fan-out: route_after_hil() returns Send() objects so multiple
+    # agents can run in the same superstep for compound queries, or the string
+    # "output_guardrail_node" when a reviewer rejected the request.
     # The path map lists every valid destination so LangGraph can validate the
     # graph at compile time even though Send() bypasses the string mapping at
     # runtime.
     builder.add_conditional_edges(
-        "intent_classifier_node",
-        dispatch_agents,
+        "hil_check_node",
+        route_after_hil,
         {
             "CodeAgent":     "CodeAgent",
             "DocAgent":      "DocAgent",
@@ -544,6 +652,7 @@ def build_supervisor_graph(
             "ArchAgent":     "ArchAgent",
             "WebAgent":      "WebAgent",
             "response_node": "response_node",
+            "output_guardrail_node": "output_guardrail_node",
         },
     )
 
@@ -551,13 +660,7 @@ def build_supervisor_graph(
     for _agent in ("CodeAgent", "DocAgent", "DebugAgent", "ArchAgent", "WebAgent"):
         builder.add_edge(_agent, "synthesizer_node")
 
-    builder.add_edge("synthesizer_node", "hil_check_node")
-
-    builder.add_conditional_edges(
-        "hil_check_node",
-        route_hil,
-        {"output_guardrail_node": "output_guardrail_node"},
-    )
+    builder.add_edge("synthesizer_node", "output_guardrail_node")
 
     builder.add_edge("output_guardrail_node", "response_node")
     builder.add_edge("response_node",         "memory_write_node")

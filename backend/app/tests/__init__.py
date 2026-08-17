@@ -13,7 +13,7 @@ PhaseTest entry — no registration needed anywhere else.
     test_hil_workflow      → HIL trigger conditions, resume endpoint
     test_guardrails        → injection detection, PII scrubbing, code safety scan
     test_streaming_api     → SSE endpoints, schema validation, event format
-    test_observability     → Langfuse tracing + OpenTelemetry (Jaeger) modules
+    test_observability     → Langfuse tracing + evaluation modules
 
 Each module must export:
     SUITE_NAME  : str              — shown in the startup report header

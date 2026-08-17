@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 SSE_EVENT_TYPES: frozenset[str] = frozenset({
     "token",
+    "token_reset",
     "tool_call",
     "tool_result",
     "agent_switch",
@@ -45,6 +46,23 @@ SSE_EVENT_TYPES: frozenset[str] = frozenset({
     "done",
     "error",
 })
+
+# Nodes whose LLM output IS the answer shown to the user. Every other LLM call
+# in the graph is internal machinery — intent routing emits routing JSON and
+# memory writing emits extracted facts — and must never reach the client.
+ANSWER_NODES: frozenset[str] = frozenset({
+    "code_generate_node",
+    "doc_generate_node",
+    "debug_generate_node",
+    "arch_generate_node",
+    "synthesizer_node",
+})
+
+# On a multi-agent query every agent streams its own full answer and THEN the
+# synthesiser streams the merged answer. Appending both showed the user the
+# same facts two or three times over. The synthesiser's output supersedes the
+# drafts, so a token_reset is emitted the moment it produces its first token.
+SUPERSEDING_NODE: str = "synthesizer_node"
 
 
 # ── SSEEvent Dataclass ────────────────────────────────────────────────────────
@@ -75,11 +93,47 @@ def format_sse(event: SSEEvent) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+_MAX_SOURCES = 8
+_MAX_SNIPPET_CHARS = 400
+
+
+def _collect_sources(snapshot: Any) -> list:
+    """Extract client-safe citation sources from the final graph state.
+
+    The agents already sanitise ``file_path`` (see ``sanitise_source_path``), so
+    no server-side absolute path is exposed. Snippets are truncated and the
+    list is capped so the terminal event stays small. Never raises.
+    """
+    try:
+        values = getattr(snapshot, "values", None) or {}
+        raw = values.get("sources") or []
+        out = []
+        seen = set()
+        for s in raw:
+            if not isinstance(s, dict):
+                continue
+            path = str(s.get("file_path") or s.get("source") or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            out.append({
+                "file_path": path,
+                "score": round(float(s.get("score") or 0.0), 4),
+                "snippet": str(s.get("content") or "")[:_MAX_SNIPPET_CHARS],
+            })
+            if len(out) >= _MAX_SOURCES:
+                break
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[streaming] source collection failed: %s", exc)
+        return []
+
+
 # ── Graph Event Stream Consumer ───────────────────────────────────────────────
 
 async def stream_graph_events(
     graph: Any,
-    initial_state: Optional[dict],
+    initial_state: Optional[Any],
     config: dict,
 ) -> AsyncIterator[str]:
     """
@@ -98,9 +152,9 @@ async def stream_graph_events(
     graph:
         A compiled LangGraph ``CompiledGraph`` (or compatible duck-type).
     initial_state:
-        The starting AgentState dict.  Pass ``None`` when resuming from
-        a previously saved checkpoint (the graph reads state from the
-        checkpointer in that case).
+        The starting AgentState dict, a ``Command(resume=...)`` when answering a
+        HIL interrupt, or ``None`` to continue from the saved checkpoint
+        (the graph reads state from the checkpointer in that case).
     config:
         LangGraph ``RunnableConfig`` dict, must contain
         ``config["configurable"]["thread_id"]``.
@@ -135,6 +189,8 @@ async def stream_graph_events(
         # Simpler guard: set to True the moment any on_chat_model_stream fires.
         # If True, the response_node fallback is skipped (tokens already delivered).
         _any_tokens_streamed: bool = False
+        # True once synthesiser output has superseded the per-agent drafts.
+        _synthesis_started: bool = False
 
         async for event in event_stream:
             kind: str = event.get("event", "")
@@ -144,6 +200,9 @@ async def stream_graph_events(
 
             # ── Token events ─────────────────────────────────────────────────
             if kind == "on_chat_model_stream":
+                node = (event.get("metadata") or {}).get("langgraph_node", "")
+                if node not in ANSWER_NODES:
+                    continue
                 chunk = event.get("data", {}).get("chunk")
                 if chunk is not None:
                     token = (
@@ -152,6 +211,15 @@ async def stream_graph_events(
                         else str(chunk)
                     )
                     if token:
+                        if node == SUPERSEDING_NODE and not _synthesis_started:
+                            _synthesis_started = True
+                            yield format_sse(SSEEvent(
+                                type="token_reset",
+                                data={"reason": "synthesis supersedes agent drafts"},
+                                agent=name,
+                                checkpoint_id=run_id,
+                                ts=time.time() * 1000,
+                            ))
                         _any_tokens_streamed = True
                         for parent_id in event.get("parent_ids", []):
                             _streamed_run_ids.add(parent_id)
@@ -252,10 +320,55 @@ async def stream_graph_events(
                     ts=time.time() * 1000,
                 ))
 
+        # LangGraph's interrupt() does NOT surface through astream_events — no
+        # event carries a "__interrupt__" tag, name or output key. The pause is
+        # only observable on the checkpoint: snapshot.next names the paused node
+        # and snapshot.tasks[].interrupts carries the payload. Without this the
+        # graph paused correctly but the browser never learned about it, so the
+        # HIL review UI could never appear.
+        interrupted = False
+        snapshot = None
+        try:
+            # State must be read from the ROOT namespace. The request config
+            # carries checkpoint_ns=<org_id|"default">, but LangGraph treats
+            # checkpoint_ns as a SUBGRAPH name, so aget_state() raised
+            # "Subgraph default not found" and the interrupt was never seen.
+            state_config = dict(config or {})
+            configurable = dict(state_config.get("configurable") or {})
+            configurable["checkpoint_ns"] = ""
+            configurable.pop("checkpoint_id", None)
+            state_config["configurable"] = configurable
+
+            snapshot = await graph.aget_state(state_config)
+            for task in (getattr(snapshot, "tasks", None) or []):
+                for intr in (getattr(task, "interrupts", None) or []):
+                    payload = getattr(intr, "value", None) or {}
+                    if not isinstance(payload, dict):
+                        payload = {"reason": str(payload)}
+                    interrupted = True
+                    yield format_sse(SSEEvent(
+                        type="interrupt",
+                        data={
+                            "reason": payload.get("reason", "Human review required"),
+                            "query": payload.get("query"),
+                            "awaiting_input": True,
+                            "node": getattr(task, "name", None),
+                        },
+                        agent=getattr(task, "name", "Supervisor"),
+                        checkpoint_id=str(
+                            (getattr(snapshot, "config", {}) or {})
+                            .get("configurable", {})
+                            .get("checkpoint_id", "")
+                        ),
+                        ts=time.time() * 1000,
+                    ))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[streaming] interrupt detection failed: %s", exc)
+
         # Normal completion → emit exactly one terminal ``done`` event.
         yield format_sse(SSEEvent(
             type="done",
-            data={},
+            data={"interrupted": interrupted, "sources": _collect_sources(snapshot)},
             agent="Supervisor",
             checkpoint_id="",
             ts=time.time() * 1000,

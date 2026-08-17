@@ -46,6 +46,12 @@ services:
     ports:
       - "${LANGFUSE_WEB_PORT:-3000}:3000"
     environment:
+      # Docker injects HOSTNAME=<container id>, and the Next.js standalone
+      # server binds to whatever HOSTNAME resolves to — the container IP, not
+      # 0.0.0.0. The container's own healthcheck then gets ECONNREFUSED on
+      # localhost:3000 and the service is permanently "unhealthy" even though
+      # the API works. Bind all interfaces instead.
+      HOSTNAME: "0.0.0.0"
       # ---- Core / Postgres ----
       DATABASE_URL: postgresql://${LANGFUSE_POSTGRES_USER:-langfuse}:${LANGFUSE_POSTGRES_PASSWORD:-langfuse}@postgres:5432/${LANGFUSE_POSTGRES_DB:-langfuse}
       NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3000}
@@ -88,7 +94,10 @@ services:
       LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/health"]
+      # 127.0.0.1, not localhost: the container resolves localhost to ::1 first
+      # and the Next.js server listens on IPv4 only, so the probe would get
+      # ECONNREFUSED and mark a perfectly healthy service as unhealthy.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/public/health"]
       interval: 15s
       timeout: 5s
       retries: 10

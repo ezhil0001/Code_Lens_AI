@@ -85,20 +85,20 @@ async def debug_retrieve_node(state: dict, config: RunnableConfig = None) -> dic
         from app.services.pipeline_factory import get_pipeline_factory_cached
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
-        from app.core.database import get_retrieval_lock
-        _lock = get_retrieval_lock()
+        from app.core.database import run_retrieval
 
         def _do_retrieve():
-            # H-1: sync retrieval + lock in a worker thread — never on the loop.
-            with _lock:
-                return retriever.retrieve(
-                    query=enriched_query,
-                    top_k=10,
-                    metadata_filter={"file_type": "code"},
-                )
+            # H-1: blocking retrieval on the dedicated pool — never on the event loop.
+            # Model inference is serialised at the model boundary
+            # (get_embedding_lock / get_reranker_lock), not by a coarse mutex.
+            return retriever.retrieve(
+                query=enriched_query,
+                top_k=10,
+                metadata_filter={"file_type": "code"},
+            )
 
         import asyncio
-        result = await asyncio.to_thread(_do_retrieve)
+        result = await run_retrieval(_do_retrieve)
         chunks = result.chunks if result else []
         logger.info("[debug_retrieve_node] retrieved %d chunks", len(chunks))
     except Exception as exc:  # noqa: BLE001
@@ -119,19 +119,17 @@ async def debug_pattern_node(state: dict, config: RunnableConfig = None) -> dict
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
         import threading
-        from app.core.database import get_retrieval_lock
-        _lock = get_retrieval_lock()
+        from app.core.database import run_retrieval
 
         def _do_pattern_retrieve():
-            with _lock:
-                return retriever.retrieve(
-                    query=f"error handling {query}",
-                    top_k=3,
-                    metadata_filter=None,
-                )
+            return retriever.retrieve(
+                query=f"error handling {query}",
+                top_k=3,
+                metadata_filter=None,
+            )
 
         import asyncio
-        result = await asyncio.to_thread(_do_pattern_retrieve)
+        result = await run_retrieval(_do_pattern_retrieve)
         pattern_chunks = (result.chunks if result else [])[:3]
     except Exception as exc:  # noqa: BLE001
         logger.debug("[debug_pattern_node] pattern search failed: %s", exc)
@@ -168,21 +166,19 @@ async def debug_dependency_node(state: dict, config: RunnableConfig = None) -> d
             import threading
             factory = get_pipeline_factory_cached()
             retriever = factory.get_retriever_engine()
-            from app.core.database import get_retrieval_lock
-            _lock = get_retrieval_lock()
+            from app.core.database import run_retrieval
             # Search for code that calls or imports the target function
             caller_query = f"calls {target_func} OR imports {target_func} OR {target_func}("
 
             def _do_caller_retrieve():
-                with _lock:
-                    return retriever.retrieve(
-                        query=caller_query,
-                        top_k=5,
-                        metadata_filter={"file_type": "code"},
-                    )
+                return retriever.retrieve(
+                    query=caller_query,
+                    top_k=5,
+                    metadata_filter={"file_type": "code"},
+                )
 
             import asyncio
-            result = await asyncio.to_thread(_do_caller_retrieve)
+            result = await run_retrieval(_do_caller_retrieve)
             raw_callers = result.chunks if result else []
             # Filter to chunks that actually reference the function name
             for chunk in raw_callers:
@@ -226,7 +222,11 @@ async def debug_generate_node(state: dict, config: RunnableConfig = None) -> dic
     for i, chunk in enumerate(chunks):
         content = chunk.get("content", chunk.get("page_content", ""))[:MAX_CHARS_PER_SOURCE]
         metadata = chunk.get("metadata", {})
-        file_path = metadata.get("file_path", metadata.get("source", "unknown"))
+        from app.graph.nodes.synthesizer import sanitise_source_path
+        # Never expose the server's absolute ingest path to a client.
+        file_path = sanitise_source_path(
+            metadata.get("file_path", metadata.get("source", "unknown"))
+        )
         context_parts.append(f"### {file_path}\n```\n{content}\n```")
         sources.append({
             "id": chunk.get("id", f"debug-{i}"),

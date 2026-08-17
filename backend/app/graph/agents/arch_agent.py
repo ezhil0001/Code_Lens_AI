@@ -37,16 +37,16 @@ async def arch_retrieve_node(state: dict, config: RunnableConfig = None) -> dict
         from app.services.pipeline_factory import get_pipeline_factory_cached
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
-        from app.core.database import get_retrieval_lock
-        _lock = get_retrieval_lock()
+        from app.core.database import run_retrieval
 
         def _do_retrieve():
-            # H-1: sync retrieval + lock in a worker thread — never on the loop.
-            with _lock:
-                return retriever.retrieve(query=query, top_k=10, metadata_filter=None)
+            # H-1: blocking retrieval on the dedicated pool — never on the event loop.
+            # Model inference is serialised at the model boundary
+            # (get_embedding_lock / get_reranker_lock), not by a coarse mutex.
+            return retriever.retrieve(query=query, top_k=10, metadata_filter=None)
 
         import asyncio
-        result = await asyncio.to_thread(_do_retrieve)
+        result = await run_retrieval(_do_retrieve)
         chunks = result.chunks if result else []
         logger.info("[arch_retrieve_node] retrieved %d hybrid chunks", len(chunks))
     except Exception as exc:  # noqa: BLE001
@@ -70,7 +70,15 @@ async def arch_rerank_node(state: dict, config: RunnableConfig = None) -> dict:
         reranker = getattr(factory, "get_reranker", None)
         if reranker and chunks:
             # rerank() returns a (docs, scores) tuple
-            result = factory.get_reranker().rerank(query=query, documents=chunks, top_k=5)
+            # Cross-encoder inference is CPU-bound and takes seconds on
+            # ~20 candidates. Running it inline blocked the event loop, so
+            # /api/health returned 000 under concurrent load. Offload it to the
+            # bounded retrieval pool like every other model call.
+            from app.core.database import run_retrieval
+            _reranker = factory.get_reranker()
+            result = await run_retrieval(
+                lambda: _reranker.rerank(query=query, documents=chunks, top_k=5)
+            )
             if isinstance(result, tuple):
                 reranked, scores = result[0], list(result[1] or [])
             else:
@@ -98,7 +106,11 @@ async def arch_generate_node(state: dict, config: RunnableConfig = None) -> dict
     for i, chunk in enumerate(chunks):
         content = chunk.get("content", chunk.get("page_content", ""))[:MAX_CHARS_PER_SOURCE]
         metadata = chunk.get("metadata", {})
-        file_path = metadata.get("file_path", metadata.get("source", "unknown"))
+        from app.graph.nodes.synthesizer import sanitise_source_path
+        # Never expose the server's absolute ingest path to a client.
+        file_path = sanitise_source_path(
+            metadata.get("file_path", metadata.get("source", "unknown"))
+        )
         file_type = metadata.get("file_type", "unknown")
         context_parts.append(f"### [{file_type}] {file_path}\n{content}")
         sources.append({

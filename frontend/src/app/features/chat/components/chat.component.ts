@@ -1,7 +1,7 @@
 import { Component, OnInit, OnDestroy, ViewChild, ElementRef, AfterViewChecked, ChangeDetectorRef, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { HttpClientModule } from '@angular/common/http';
+import { HttpClient, HttpClientModule } from '@angular/common/http';
 import { Subscription } from 'rxjs';
 import { MarkdownViewerComponent } from '../../../shared/components/markdown-viewer/markdown-viewer.component';
 import { CitationBadgeComponent } from '../../../shared/components/citation-badge/citation-badge.component';
@@ -10,6 +10,7 @@ import { IngestService } from '../../../core/services/ingest.service';
 import { Message, Citation } from '../../../data/models/message.model';
 import { AgentActivityComponent } from './agent-activity.component';
 import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
+import { environment } from '../../../../environments/environment';
 
 /**
  * ChatComponent
@@ -193,7 +194,7 @@ import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
               </div>
 
               <!-- Citations -->
-              <div *ngIf="message.citations && message.citations.length > 0" class="citations">
+              <div *ngIf="showCitations && message.citations && message.citations.length > 0" class="citations">
                 <div class="citations-label">📚 Sources:</div>
                 <app-citation-badge
                   *ngFor="let citation of message.citations"
@@ -239,7 +240,8 @@ import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
         <div class="input-row">
           <textarea
             [(ngModel)]="userInput"
-            (keydown.enter)="onEnterKey($event)"
+            (keydown.control.enter)="onEnterKey($event)"
+            (keydown.meta.enter)="onEnterKey($event)"
             placeholder="Ask me about your code... (Ctrl+Enter to send)"
             class="message-input"
             [disabled]="isLoading"
@@ -998,9 +1000,38 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     private agentStreamService: AgentStreamService,
     private ingestService: IngestService,
     private cdr: ChangeDetectorRef,
+    private http: HttpClient,
   ) {}
 
+  /** Restore the persisted conversation so a refresh doesn't blank the chat. */
+  private _loadHistory(): void {
+    const token = localStorage.getItem('auth_token');
+    if (!token) return;
+    this.subs.add(
+      this.http
+        .get<{ messages: Array<{ role: string; content: string }> }>(
+          `${environment.apiUrl}/api/v2/chat/history/${this.currentSessionId}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        )
+        .subscribe({
+          next: (res) => {
+            if (this.messages.length || !res?.messages?.length) return;
+            this.messages = res.messages.map((m, i) => ({
+              id: `hist-${i}`,
+              role: m.role === 'assistant' ? 'assistant' : 'user',
+              content: m.content,
+              timestamp: new Date(),
+            })) as Message[];
+            this.shouldScroll = true;
+            this.cdr.detectChanges();
+          },
+          error: (e) => console.warn('history recovery failed', e?.status ?? e),
+        }),
+    );
+  }
+
   ngOnInit() {
+    this._loadHistory();
     // ── agent stream subscriptions ────────────────────────────────
     this.subs.add(
       this.agentStreamService.fullMessage$.subscribe((text) => {
@@ -1039,6 +1070,27 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
           this.messages = [...this.messages.slice(0, lastIdx), updated];
           this.cdr.detectChanges();
         }
+      })
+    );
+
+    this.subs.add(
+      this.agentStreamService.sources$.subscribe((sources) => {
+        if (!sources.length || this.messages.length === 0) return;
+        const lastIdx = this.messages.length - 1;
+        if (this.messages[lastIdx].role !== 'assistant') return;
+        const citations: Citation[] = sources.map((s) => ({
+          sourceFile: s.file_path,
+          repository: '',
+          lineStart: 0,
+          lineEnd: 0,
+          codeSnippet: s.snippet,
+          relevanceScore: s.score,
+        }));
+        this.messages = [
+          ...this.messages.slice(0, lastIdx),
+          { ...this.messages[lastIdx], citations },
+        ];
+        this.cdr.detectChanges();
       })
     );
 
@@ -1113,13 +1165,11 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   /**
-   * Handle Enter key press in textarea
+   * Handle Ctrl/Cmd+Enter in the textarea. Plain Enter stays a newline.
    */
   onEnterKey(event: Event) {
-    const keyboardEvent = event as KeyboardEvent;
-    if (keyboardEvent.ctrlKey) {
-      this.sendMessage();
-    }
+    event.preventDefault();
+    this.sendMessage();
   }
 
   /**

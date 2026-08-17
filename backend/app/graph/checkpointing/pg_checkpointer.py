@@ -27,9 +27,32 @@ logger = logging.getLogger(__name__)
 
 # ── Process-wide singleton ────────────────────────────────────────────────────
 _saver = None
-_saver_lock = threading.Lock()
 _setup_done = False
 _async_pool = None  # dedicated AsyncConnectionPool for the checkpointer
+
+# The singleton guard MUST be an asyncio.Lock, never a threading.Lock.
+# get_checkpointer() awaits pool.open() and saver.setup() while holding it. A
+# threading.Lock blocks the OS thread, which for an async caller is the event
+# loop thread itself: the first request yields at its `await` still holding the
+# lock, the second request blocks the entire loop waiting for it, and the first
+# can never be resumed to release it. That deadlocked the whole server (every
+# endpoint, including /api/health) on the 2nd concurrent request.
+# asyncio.Lock instead suspends only the waiting coroutine.
+# Locks are keyed per event loop because asyncio primitives cannot be shared
+# across loops (get_checkpointer_sync may spin up its own).
+_saver_locks: "dict[object, asyncio.Lock]" = {}
+_saver_locks_guard = threading.Lock()
+
+
+def _get_saver_lock() -> "asyncio.Lock":
+    """Return the asyncio.Lock bound to the currently running event loop."""
+    loop = asyncio.get_running_loop()
+    with _saver_locks_guard:
+        lock = _saver_locks.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _saver_locks[loop] = lock
+        return lock
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,7 +135,7 @@ async def get_checkpointer():
     if _saver is not None:
         return _saver
 
-    with _saver_lock:
+    async with _get_saver_lock():
         if _saver is not None:
             return _saver
 

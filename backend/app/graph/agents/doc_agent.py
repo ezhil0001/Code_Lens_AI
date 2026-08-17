@@ -47,20 +47,20 @@ async def doc_retrieve_node(state: dict, config: RunnableConfig = None) -> dict:
         from app.services.pipeline_factory import get_pipeline_factory_cached
         factory = get_pipeline_factory_cached()
         retriever = factory.get_retriever_engine()
-        from app.core.database import get_retrieval_lock
-        _lock = get_retrieval_lock()
+        from app.core.database import run_retrieval
 
         def _do_retrieve():
-            # H-1: sync retrieval + lock in a worker thread — never on the loop.
-            with _lock:
-                return retriever.retrieve(
-                    query=query,
-                    top_k=10,
-                    metadata_filter=DOC_AGENT_METADATA_FILTER,
-                )
+            # H-1: blocking retrieval on the dedicated pool — never on the event loop.
+            # Model inference is serialised at the model boundary
+            # (get_embedding_lock / get_reranker_lock), not by a coarse mutex.
+            return retriever.retrieve(
+                query=query,
+                top_k=10,
+                metadata_filter=DOC_AGENT_METADATA_FILTER,
+            )
 
         import asyncio
-        result = await asyncio.to_thread(_do_retrieve)
+        result = await run_retrieval(_do_retrieve)
         chunks = result.chunks if result else []
         logger.info("[doc_retrieve_node] retrieved %d doc chunks", len(chunks))
     except Exception as exc:  # noqa: BLE001
@@ -84,7 +84,15 @@ async def doc_rerank_node(state: dict, config: RunnableConfig = None) -> dict:
         reranker = getattr(factory, "get_reranker", None)
         if reranker and chunks:
             # rerank() returns a (docs, scores) tuple
-            result = factory.get_reranker().rerank(query=query, documents=chunks, top_k=5)
+            # Cross-encoder inference is CPU-bound and takes seconds on
+            # ~20 candidates. Running it inline blocked the event loop, so
+            # /api/health returned 000 under concurrent load. Offload it to the
+            # bounded retrieval pool like every other model call.
+            from app.core.database import run_retrieval
+            _reranker = factory.get_reranker()
+            result = await run_retrieval(
+                lambda: _reranker.rerank(query=query, documents=chunks, top_k=5)
+            )
             if isinstance(result, tuple):
                 reranked, scores = result[0], list(result[1] or [])
             else:
@@ -108,7 +116,11 @@ async def doc_generate_node(state: dict, config: RunnableConfig = None) -> dict:
     for i, chunk in enumerate(chunks):
         content = chunk.get("content", chunk.get("page_content", ""))[:MAX_CHARS_PER_SOURCE]
         metadata = chunk.get("metadata", {})
-        file_path = metadata.get("file_path", metadata.get("source", "unknown"))
+        from app.graph.nodes.synthesizer import sanitise_source_path
+        # Never expose the server's absolute ingest path to a client.
+        file_path = sanitise_source_path(
+            metadata.get("file_path", metadata.get("source", "unknown"))
+        )
         section = metadata.get("section", "")
         heading = f"{file_path} — {section}" if section else file_path
         context_parts.append(f"### {heading}\n{content}")
@@ -167,11 +179,13 @@ async def doc_generate_node(state: dict, config: RunnableConfig = None) -> dict:
                     chunks.append(piece)
             response_text = "".join(chunks) or "[DocAgent: empty response]"
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[doc_generate_node] LLM call failed: %s", exc)
-        if context_parts:
-            response_text = (
-                f"Based on the KT documentation for '{query}':\n\n" + context_text[:2000]
-            )
+        logger.error("[doc_generate_node] LLM call failed: %s", exc, exc_info=True)
+        # Dumping raw retrieved chunks here read as a confident answer while
+        # actually being unrelated corpus text. Say the answer is unavailable.
+        response_text = (
+            "I couldn't generate an answer just now — the language model was "
+            "unavailable. Relevant sources are listed below; please retry."
+        )
 
     agent_responses = dict(state.get("agent_responses", {}))
     agent_responses["DocAgent"] = response_text

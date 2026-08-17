@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
@@ -105,8 +106,97 @@ _RETRIEVAL_LOCK = threading.RLock()
 
 
 def get_retrieval_lock() -> "threading.RLock":
-    """Return the shared, process-wide lock guarding model-backed retrieval."""
+    """Return the shared, process-wide lock guarding model-backed retrieval.
+
+    DEPRECATED as a coarse pipeline guard. It used to wrap the *entire*
+    ``retriever.retrieve()`` call — query expansion (a network LLM call),
+    Chroma/BM25 search, reranking and parent-context assembly — which
+    serialised every independent request behind one mutex for ~20s.
+
+    Thread-safety is now enforced at the model boundary instead
+    (:func:`get_embedding_lock` / :func:`get_reranker_lock`), which is both
+    narrower and stronger: it protects every caller of the shared models, not
+    just the agent nodes. Retained for callers that genuinely need whole-
+    pipeline exclusion.
+    """
     return _RETRIEVAL_LOCK
+
+
+# Fine-grained model-inference guards. The embedder and the cross-encoder are
+# process-wide singletons, so concurrent forward passes must be serialised
+# (concurrent SentenceTransformer inference on Apple MPS is known to deadlock).
+# These are held for milliseconds around the inference call only, so
+# independent requests overlap on everything else: query expansion, Chroma and
+# BM25 search, parent-context assembly and LLM generation.
+_EMBED_LOCK = threading.RLock()
+_RERANK_LOCK = threading.RLock()
+
+
+def get_embedding_lock() -> "threading.RLock":
+    """Serialise forward passes through the shared embedding model."""
+    return _EMBED_LOCK
+
+
+def get_reranker_lock() -> "threading.RLock":
+    """Serialise forward passes through the shared cross-encoder reranker."""
+    return _RERANK_LOCK
+
+
+# Retrieval must NOT run on asyncio's default executor. That pool is only
+# ``min(32, cpu_count + 4)`` threads (12 here) and is also used by the semantic
+# cache and other ``asyncio.to_thread`` callers. Under concurrency every pool
+# thread ends up parked on _RETRIEVAL_LOCK, so the request holding the lock can
+# never complete its own to_thread work — a thread-pool starvation deadlock that
+# wedged the whole event loop. A dedicated pool bounds retrieval and keeps the
+# default executor free.
+_RETRIEVAL_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_RETRIEVAL_EXECUTOR_LOCK = threading.Lock()
+# Retrieval is CPU-bound (embedding + cross-encoder forward passes) and each
+# worker fans out further across torch's intra-op threads. Left unbounded that
+# oversubscribes the CPU and starves the event loop of GIL time, so /api/health
+# stalls for >10s under load. Keep workers x torch-threads under the core count
+# (see configure_inference_threads).
+RETRIEVAL_MAX_WORKERS = int(os.getenv("RETRIEVAL_MAX_WORKERS", "2"))
+
+
+def get_retrieval_executor() -> ThreadPoolExecutor:
+    """Return the dedicated pool used for blocking retrieval work."""
+    global _RETRIEVAL_EXECUTOR
+    if _RETRIEVAL_EXECUTOR is None:
+        with _RETRIEVAL_EXECUTOR_LOCK:
+            if _RETRIEVAL_EXECUTOR is None:
+                _RETRIEVAL_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=RETRIEVAL_MAX_WORKERS,
+                    thread_name_prefix="retrieval",
+                )
+    return _RETRIEVAL_EXECUTOR
+
+
+async def run_retrieval(fn, *args):
+    """Run blocking retrieval on the dedicated pool, never the default one.
+
+    The current context is copied into the worker exactly like
+    ``asyncio.to_thread`` does. ``loop.run_in_executor`` does NOT propagate
+    contextvars, so without this the OpenTelemetry/Langfuse span context is
+    lost in the worker and every retrieval, rerank and cache span is emitted as
+    its own orphan root trace instead of nesting under chat.supervisor.
+    """
+    import asyncio
+    import contextvars
+
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(
+        get_retrieval_executor(), lambda: ctx.run(fn, *args)
+    )
+
+
+def close_retrieval_executor(wait: bool = False) -> None:
+    """Release retrieval workers at process shutdown."""
+    global _RETRIEVAL_EXECUTOR
+    if _RETRIEVAL_EXECUTOR is not None:
+        _RETRIEVAL_EXECUTOR.shutdown(wait=wait, cancel_futures=not wait)
+        _RETRIEVAL_EXECUTOR = None
 
 
 def get_pg_pool():

@@ -78,4 +78,7 @@ chroma_db/
 # Coverage
 coverage/
 
-
+# Virtual environments (any suffix, e.g. venv311)
+venv*/
+.venv*/
+**/venv*/

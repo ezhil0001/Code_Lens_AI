@@ -269,7 +269,15 @@ class TokenBlacklistManager:
                 self._backend = InMemoryTokenBlacklist()
                 logger.info("✓ Token blacklist using in-memory backend")
         except Exception as e:
-            logger.warning(f"Failed to initialize Redis backend, using in-memory: {e}")
+            # In-memory revocation is per-process: with >1 worker, or after a
+            # restart, a "revoked" token becomes valid again. If Redis was
+            # explicitly configured, silently downgrading is a security
+            # regression, so make it impossible to miss.
+            logger.error(
+                "REDIS TOKEN BLACKLIST UNAVAILABLE (%s) — falling back to "
+                "in-memory. Logout will NOT revoke tokens across processes or "
+                "restarts. Install `redis` and verify REDIS_URL.", e,
+            )
             self._backend = InMemoryTokenBlacklist()
     
     def revoke_token(self, jti: str, expiration_time: datetime) -> bool:

@@ -38,6 +38,7 @@ import { environment } from '../../../environments/environment';
 /** All SSE event types emitted by the v2 backend. */
 export type SSEEventType =
   | 'token'
+  | 'token_reset'
   | 'tool_call'
   | 'tool_result'
   | 'agent_switch'
@@ -75,6 +76,13 @@ export interface HILInterruptPayload {
   checkpoint_id: string;
 }
 
+/** One retrieval source backing the answer, sent on the terminal `done` event. */
+export interface SourceRef {
+  file_path: string;
+  score: number;
+  snippet: string;
+}
+
 /** Summary row returned by GET /api/v2/sessions/{id}/checkpoints */
 export interface CheckpointSummary {
   checkpoint_id: string;
@@ -94,6 +102,11 @@ export class AgentStreamService {
   private _fullMessage = new BehaviorSubject<string>('');
   /** Full accumulated markdown response as it streams. */
   readonly fullMessage$: Observable<string> = this._fullMessage.asObservable();
+
+  // ── Retrieval sources backing the current answer ──────────────────────────
+  private _sources = new BehaviorSubject<SourceRef[]>([]);
+  /** Sources from the terminal `done` event; empty until the answer completes. */
+  readonly sources$: Observable<SourceRef[]> = this._sources.asObservable();
 
   // ── Loading / streaming state ─────────────────────────────────────────────
   private _loading = new BehaviorSubject<boolean>(false);
@@ -187,7 +200,7 @@ export class AgentStreamService {
       headers['Last-Event-ID'] = this._lastCheckpointId;
     }
 
-    const token = localStorage.getItem('access_token');
+    const token = localStorage.getItem('auth_token');
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     this._abortController = new AbortController();
@@ -262,7 +275,7 @@ export class AgentStreamService {
       checkpoint_id: interrupt.checkpoint_id,
     });
 
-    const token = localStorage.getItem('access_token');
+    const token = localStorage.getItem('auth_token');
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -319,7 +332,7 @@ export class AgentStreamService {
 
   /** Load checkpoint history for a session from the API. */
   loadCheckpoints(sessionId: string): Observable<CheckpointSummary[]> {
-    const token = localStorage.getItem('access_token');
+    const token = localStorage.getItem('auth_token');
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
@@ -335,7 +348,7 @@ export class AgentStreamService {
     this._currentSessionId = sessionId;
     this._loading.next(true);
 
-    const token = localStorage.getItem('access_token');
+    const token = localStorage.getItem('auth_token');
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
@@ -376,6 +389,14 @@ export class AgentStreamService {
       case 'token': {
         const content = (event.data['content'] as string) ?? '';
         this._fullMessage.next(this._fullMessage.value + content);
+        break;
+      }
+
+      // Multi-agent runs stream each agent's draft answer before the
+      // synthesiser streams the merged one. Drop the drafts so the user sees
+      // the final answer once instead of the same facts two or three times.
+      case 'token_reset': {
+        this._fullMessage.next('');
         break;
       }
 
@@ -457,6 +478,10 @@ export class AgentStreamService {
       case 'done': {
         this._loading.next(false);
         this._markAllRunningDone();
+        const sources = Array.isArray(event.data['sources'])
+          ? (event.data['sources'] as SourceRef[])
+          : [];
+        this._sources.next(sources);
         this._addActivity({
           label: '✅ Response complete',
           agent: 'Supervisor',
@@ -490,6 +515,7 @@ export class AgentStreamService {
     this._abortController?.abort();
     this._abortController = null;
     this._fullMessage.next('');
+    this._sources.next([]);
     this._activity.next([]);
     this._hil.next(null);
     this._error.next(null);

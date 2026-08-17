@@ -26,8 +26,30 @@ from pydantic import Field
 from typing import Optional, Generator
 from functools import lru_cache
 import logging
+import os
+from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
+
+# SSL_CERT_FILE / REQUESTS_CA_BUNDLE are read by OpenSSL and httpx for EVERY
+# outbound HTTPS client. If either points at a missing file, client
+# construction raises FileNotFoundError - which the Groq/Langfuse init paths
+# caught broadly and degraded to a lexical fallback, silently publishing fake
+# RAGAS scores. Anaconda and a stale .env entry both set it to a bad path, so
+# drop unusable values here, at the earliest-imported module, before any HTTP
+# client exists.
+for _ssl_var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+    _val = os.environ.get(_ssl_var)
+    if _val and not Path(_val).exists():
+        _fallback = "/opt/anaconda3/ssl/cacert.pem"
+        if Path(_fallback).exists():
+            os.environ[_ssl_var] = _fallback
+        else:
+            del os.environ[_ssl_var]
+        logging.getLogger(__name__).warning(
+            "%s pointed at a missing file (%s) - sanitised so HTTPS clients work",
+            _ssl_var, _val,
+        )
 import os
 
 logger = logging.getLogger(__name__)

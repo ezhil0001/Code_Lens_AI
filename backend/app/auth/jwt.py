@@ -23,8 +23,38 @@ logger = logging.getLogger(__name__)
 
 # ==================== Configuration ====================
 
+_INSECURE_DEFAULT = "your-secret-key-change-in-production"
+
+
+def _load_jwt_secret() -> str:
+    """Resolve the JWT signing secret from validated Settings.
+
+    Reading ``os.getenv("SECRET_KEY", <default>)`` here was an authentication
+    bypass: ``.env`` is loaded by pydantic-settings into ``Settings``, never
+    into ``os.environ``, so unless the operator happened to export the variable
+    the whole auth layer signed AND verified with the public default committed
+    to this repo — anyone could mint a token for any user with ``isAdmin`` set.
+    Settings is the single source of truth; the process refuses to start rather
+    than fall back to a guessable key.
+    """
+    secret = os.environ.get("SECRET_KEY") or ""
+    if not secret:
+        try:
+            from app.core.config import get_settings
+            secret = getattr(get_settings(), "secret_key", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"[auth] cannot resolve SECRET_KEY: {exc}") from exc
+    if not secret or secret == _INSECURE_DEFAULT or len(secret) < 32:
+        raise RuntimeError(
+            "[auth] SECRET_KEY is missing, too short (<32 chars), or still the "
+            "public default. Set a strong SECRET_KEY in backend/.env — refusing "
+            "to start with a forgeable JWT signing key."
+        )
+    return secret
+
+
 # JWT Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
+SECRET_KEY = _load_jwt_secret()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = int(os.getenv("ACCESS_TOKEN_EXPIRE_DAYS", "1"))  # 1 day like Alhena
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))

@@ -182,6 +182,26 @@ _PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(
         r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
     ), "[IP_ADDRESS]"),
+    # Credentials. A pasted key otherwise entered graph state verbatim, was
+    # sent to the LLM, and was recorded in Langfuse (the field named
+    # pii_scrubbed_query still contained the raw key).
+    # JWTs — the signature segment can legitimately be short.
+    (re.compile(
+        r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{2,}\b"
+    ), "[REDACTED_JWT]"),
+    # Vendor API keys: sk-…, pk-…, gsk_…, ghp_…, xoxb-… etc.
+    (re.compile(
+        r"\b(?:sk|pk|rk|gsk|ghp|gho|ghu|ghs|xox[bposa])[-_][A-Za-z0-9_\-]{10,}\b"
+    ), "[REDACTED_KEY]"),
+    # "Bearer <token>"
+    (re.compile(
+        r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=\-]{16,}"
+    ), r"\1 [REDACTED_TOKEN]"),
+    # Explicit secret assignments: password=…, api_key: "…", secret=…
+    (re.compile(
+        r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)"
+        r"\b(\s*[:=]\s*)(\"[^\"]+\"|'[^']+'|\S+)"
+    ), r"\1\2[REDACTED]"),
 ]
 
 

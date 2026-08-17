@@ -1,6 +1,6 @@
 """
-Human-in-the-Loop (HIL) check node — gates the response when the agent is
-uncertain or when the query signals a potentially destructive operation.
+Human-in-the-Loop (HIL) safety gate — runs BETWEEN intent classification and
+agent dispatch, so review happens *before* any answer is generated.
 
 HIL interrupts on any of these conditions:
   1. routing_confidence is below HIL_CONFIDENCE_THRESHOLD (default 0.55).
@@ -14,11 +14,14 @@ HIL interrupts on any of these conditions:
 When HIL is not triggered the node is a transparent pass-through — it adds
 one dict assignment to the state and exits.
 
-When HIL is triggered, the node sets hil_required=True and raises a
-NodeInterrupt so LangGraph persists the checkpoint and halts.  The user
-then calls POST /api/v2/sessions/{session_id}/resume with their decision.
-The resume handler writes hil_approved and hil_human_input back into the
-checkpoint before re-invoking the graph from this node.
+When HIL is triggered, the node raises LangGraph's dynamic ``interrupt()`` so
+LangGraph persists the checkpoint and halts. Because the node sits before the
+agents, **no agent or synthesiser has run and no answer token has been
+streamed** — the browser receives only the interrupt event. The user then calls
+POST /api/v2/sessions/{session_id}/resume with their decision; the resume
+handler injects hil_approved / hil_human_input and the graph continues from the
+checkpoint. On reject the node writes a safe refusal into final_response and
+``route_after_hil`` skips the agents entirely.
 """
 
 from __future__ import annotations
@@ -137,22 +140,32 @@ async def hil_check_node(
     hil_required: bool = False
     hil_reason: Optional[str] = None
 
+    # Honour the client's review settings. These arrive from ChatV2Request via
+    # _build_initial_state; previously the node ignored them entirely so the
+    # UI toggle and threshold did nothing.
+    hil_enabled: bool = bool(state.get("hil_enabled", False))
+    threshold: float = float(
+        state.get("hil_confidence_threshold") or HIL_CONFIDENCE_THRESHOLD
+    )
+
     # ── Gate 1: low routing confidence ───────────────────────────────────────
-    if confidence < HIL_CONFIDENCE_THRESHOLD:
+    if hil_enabled and confidence < threshold:
         hil_required = True
         hil_reason = (
             f"Routing confidence {confidence:.2f} is below the required "
-            f"threshold {HIL_CONFIDENCE_THRESHOLD}. "
+            f"threshold {threshold}. "
             f"Assigned agent: {active_agent or 'unknown'}. "
             "A human reviewer should confirm the correct routing."
         )
         logger.info(
             "[hil_check_node] HIL triggered — low confidence %.2f < %.2f "
             "(agent=%s, query=%r)",
-            confidence, HIL_CONFIDENCE_THRESHOLD, active_agent, query[:80],
+            confidence, threshold, active_agent, query[:80],
         )
 
     # ── Gate 2: destructive-intent keywords ───────────────────────────────────
+    # Deliberately NOT gated on hil_enabled: a destructive-action review is a
+    # safety control and must not be disableable by unchecking a client toggle.
     if not hil_required:
         label = _destructive_label(query)
         if label:
@@ -174,38 +187,55 @@ async def hil_check_node(
     # ── H-2: TRUE interruption ────────────────────────────────────────────────
     # If review is required and no human decision has been recorded yet,
     # raise a LangGraph dynamic interrupt so the checkpoint is persisted and
-    # execution PAUSES. POST /api/v2/sessions/{id}/resume injects
-    # hil_approved + hil_human_input into the thread state and re-invokes the
-    # graph; on re-execution this node sees the decision and passes through.
-    already_decided = state.get("hil_approved") is not None
-    if hil_required and not already_decided:
-        try:
-            from langgraph.errors import NodeInterrupt  # type: ignore
-        except ImportError:  # older/newer layout
-            try:
-                from langgraph.types import NodeInterrupt  # type: ignore
-            except ImportError:
-                NodeInterrupt = None  # type: ignore
+    # execution PAUSES. Because this node runs BEFORE agent dispatch, nothing
+    # has generated or streamed an answer at this point.
+    #
+    # Two resume paths must both work:
+    #   * Command(resume={"approved": ..., "human_input": ...}) — interrupt()
+    #     returns that payload instead of raising.
+    #   * POST /resume, which calls aupdate_state(as_node="hil_check_node") and
+    #     re-invokes; the decision then arrives via state.
+    # Dropping interrupt()'s return value made a REJECT fall through to the
+    # normal path and generate the very answer the reviewer had refused.
+    approved: Optional[bool] = state.get("hil_approved")
+    human_input: Optional[str] = state.get("hil_human_input")
+
+    if hil_required and approved is None:
         try:
             from app.observability.langgraph_instrumentation import record_hil_interrupt
             record_hil_interrupt(hil_reason or "hil_required")
         except Exception:  # noqa: BLE001
             pass
-        if NodeInterrupt is not None:
-            raise NodeInterrupt(hil_reason or "Human review required")
-        logger.error(
-            "[hil_check_node] NodeInterrupt unavailable — HIL cannot pause; "
-            "proceeding WITHOUT human review (degraded mode)"
-        )
 
-    # Human rejected the action → replace the response instead of proceeding.
-    if hil_required and already_decided and state.get("hil_approved") is False:
+        # LangGraph pauses on the dynamic interrupt() primitive. It binds the
+        # runnable config via asyncio.create_task(context=...), which only
+        # exists on Python 3.11+ — on 3.10 it raises and HIL cannot gate.
+        from langgraph.types import interrupt  # type: ignore
+
+        decision = interrupt({
+            "reason": hil_reason or "Human review required",
+            "query": query,
+            "awaiting_input": True,
+        })
+
+        if isinstance(decision, dict):
+            raw = decision.get("approved", decision.get("hil_approved"))
+            approved = None if raw is None else bool(raw)
+            human_input = decision.get("human_input", human_input)
+        elif decision is not None:
+            approved = bool(decision)
+
+    # Human rejected the action → refuse without ever running the agents.
+    if hil_required and approved is False:
+        logger.info("[hil_check_node] rejected by reviewer — no generation will run")
         return {
             "hil_required": False,
             "hil_reason": hil_reason,
+            "hil_approved": False,
+            "hil_human_input": human_input,
             "final_response": (
                 "This action was rejected by a human reviewer"
-                + (f": {state.get('hil_human_input')}" if state.get("hil_human_input") else ".")
+                + (f": {human_input}" if human_input else ".")
             ),
             "nodes_visited": visited,
         }
@@ -213,5 +243,7 @@ async def hil_check_node(
     return {
         "hil_required": hil_required,
         "hil_reason": hil_reason,
+        "hil_approved": approved,
+        "hil_human_input": human_input,
         "nodes_visited": visited,
     }

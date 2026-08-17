@@ -106,8 +106,6 @@ class RAGPipelineFactory:
         self.prompt_builder = self._prompt_factory.get_prompt_builder()
         logger.info("  │  ✅ Prompt components ready")
 
-        # ── Observability ────────────────────────────────────────────────────
-        self._init_observability()
         logger.info("✅ RAGPipelineFactory (shim) initialised\n")
 
     # ── Accessor API (unchanged surface for legacy callers) ─────────────────
@@ -130,23 +128,6 @@ class RAGPipelineFactory:
     def refresh_bm25_index(self) -> None:
         """Delegate BM25 rebuild to RetrievalFactory."""
         self._retrieval_factory.refresh_bm25_index()
-
-    # ── Observability (unchanged) ────────────────────────────────────────────
-
-    @staticmethod
-    def _init_observability() -> None:
-        try:
-            from app.observability.otel_config import (
-                setup_tracer_provider,
-                setup_instrumentation,
-            )
-            setup_tracer_provider()
-            setup_instrumentation()
-            logger.debug("✅ OpenTelemetry configured")
-        except ImportError as e:
-            logger.warning(f"OpenTelemetry not available: {e}")
-        except Exception as e:
-            logger.error(f"Failed to initialise observability: {e}")
 
     # ── Singleton ────────────────────────────────────────────────────────────
 

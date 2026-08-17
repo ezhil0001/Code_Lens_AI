@@ -11,6 +11,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Observable, BehaviorSubject, throwError, timeout } from 'rxjs';
 import { catchError, tap } from 'rxjs/operators';
+import { environment } from '../../../environments/environment';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -30,8 +31,8 @@ export interface HistoryResponse {
   providedIn: 'root',
 })
 export class SessionService {
-  private apiUrl = 'http://localhost:8000/api/v1';       // auth endpoints
-  private chatApiUrl = 'http://localhost:8000/api/v2/chat'; // chat endpoints (V2)
+  private apiUrl = `${environment.apiUrl}/api/v1`;       // auth endpoints
+  private chatApiUrl = `${environment.apiUrl}/api/v2/chat`; // chat endpoints (V2)
   private sessionId = new BehaviorSubject<string | null>(null);
   private userId = new BehaviorSubject<string | null>(null);
   public sessionId$ = this.sessionId.asObservable();
@@ -124,15 +125,17 @@ export class SessionService {
       `🔄 [SessionService] Recovering chat history for session: ${sessionId}`
     );
 
+    const headers: Record<string, string> = {
+      'X-User-ID': userId,
+      'X-Session-ID': sessionId,
+    };
+    const token = localStorage.getItem('auth_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
     return this.http
       .get<HistoryResponse>(
         `${this.chatApiUrl}/history/${sessionId}`,
-        {
-          headers: {
-            'X-User-ID': userId,
-            'X-Session-ID': sessionId,
-          },
-        }
+        { headers }
       )
       .pipe(
         timeout(3000), // 3 second timeout

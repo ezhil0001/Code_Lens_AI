@@ -72,6 +72,7 @@ class EvaluationSample:
     timestamp: Optional[datetime] = None
     source: Optional[str] = None  # Which query type (code, docs, etc.)
     trace_id: Optional[str] = None  # Langfuse trace to attach scores to
+    parent_span_id: Optional[str] = None  # request root observation to nest under
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -91,7 +92,7 @@ class EvaluationMetrics:
     """Evaluation metrics for a single sample."""
     
     faithfulness: float = 0.0  # 0-1, higher is better
-    context_recall: float = 0.0  # 0-1, higher is better
+    context_recall: Optional[float] = 0.0  # None when no reference answer exists
     answer_relevancy: float = 0.0  # 0-1, higher is better
     
     # Aggregated score
@@ -103,8 +104,13 @@ class EvaluationMetrics:
     model_used: str = "unknown"
     
     def __post_init__(self):
-        """Calculate aggregate score."""
-        scores = [self.faithfulness, self.context_recall, self.answer_relevancy]
+        """Calculate aggregate score over the metrics that were measured."""
+        # context_recall is None when there is no reference answer; averaging
+        # an unmeasured metric as 0.0 would understate the aggregate.
+        scores = [
+            s for s in (self.faithfulness, self.context_recall, self.answer_relevancy)
+            if s is not None
+        ]
         self.aggregate_score = sum(scores) / len(scores) if scores else 0.0
     
     def to_dict(self) -> Dict[str, Any]:
@@ -412,9 +418,15 @@ class RAGEvaluator:
                 logger.info("✓ RAGAS embeddings: local HuggingFace singleton")
                 return emb
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"RAGAS local embeddings unavailable: {e}")
+            logger.error(
+                "RAGAS local embeddings unavailable (%s: %s) — answer_relevancy "
+                "cannot be computed and will fall back to word overlap",
+                type(e).__name__, e,
+            )
         return None
 
+    def _setup_evaluator_llm(self):
+        """Build the judge LLM RAGAS uses to score faithfulness/relevancy."""
         provider = os.getenv("EVAL_LLM_PROVIDER", "groq").lower()
 
         if provider == "ollama":
@@ -437,11 +449,20 @@ class RAGEvaluator:
                     api_key=os.getenv("GROQ_API_KEY", ""),
                     model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
                     temperature=0.0,
+                    # Each RAGAS metric issues several judge calls, so the
+                    # evaluator hits Groq's rate limit long before the chat
+                    # path does. Without explicit retries a single 429 loses
+                    # the whole evaluation.
+                    max_retries=int(os.getenv("EVAL_LLM_MAX_RETRIES", "5")),
+                    request_timeout=float(os.getenv("EVAL_LLM_TIMEOUT", "60")),
                 )
                 logger.info(f"✓ Groq evaluator: {os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')}")
                 return llm
             except Exception as e:
-                logger.warning(f"Groq evaluator failed: {e}")
+                logger.error(
+                    "Groq evaluator unavailable (%s: %s) — ALL evaluations will "
+                    "degrade to the lexical fallback", type(e).__name__, e,
+                )
                 return None
 
         logger.warning(f"Unknown EVAL_LLM_PROVIDER: {provider}")
@@ -462,13 +483,26 @@ class RAGEvaluator:
             EvaluationResult with computed metrics, or None if evaluation fails
         """
         if not self.has_ragas or not self.evaluator_llm:
-            logger.warning("Ragas or Ollama not available - cannot evaluate")
+            logger.error(
+                "RAGAS evaluator not initialised (has_ragas=%s, llm=%s) — "
+                "falling back to lexical scoring; scores publish as heuristic_*",
+                self.has_ragas, bool(self.evaluator_llm),
+            )
             return self._fallback_evaluate(sample)
 
         # Background-job span: joins the originating request trace via
         # sample.trace_id (M-2 — executor threads lose OTEL context, so we pin
         # the trace explicitly) instead of rooting a separate trace.
+        #
+        # No trace id means the request was NOT sampled (or Langfuse is off).
+        # Opening a span here would create an orphan root trace for a request
+        # that deliberately emitted nothing, so evaluation runs untraced.
+        from contextlib import nullcontext
         from app.observability.tracing import span as _lf_span
+        sample_trace_id = getattr(sample, "trace_id", None)
+        if not sample_trace_id:
+            with nullcontext():
+                return self._evaluate_sample_inner(sample)
         with _lf_span(
             "ragas.evaluate_sample",
             kind="evaluator",
@@ -477,7 +511,8 @@ class RAGEvaluator:
                 "job.type": "ragas_evaluation",
                 "request.source": "background-job",
             },
-            trace_id=getattr(sample, "trace_id", None),
+            trace_id=sample_trace_id,
+            parent_span_id=getattr(sample, "parent_span_id", None),
         ):
             return self._evaluate_sample_inner(sample)
 
@@ -485,44 +520,114 @@ class RAGEvaluator:
         try:
             start_time = time.time()
             
-            # Prepare dataset for Ragas
+            # RAGAS >=0.2 renamed the dataset columns; the legacy
+            # question/answer/contexts/ground_truth names silently produce a
+            # zero score for every metric.
             dataset_dict = {
-                "question": [sample.query],
-                "answer": [sample.answer],
-                "contexts": [sample.retrieved_context],
-                "ground_truth": [sample.ground_truth],
+                "user_input": [sample.query],
+                "response": [sample.answer],
+                "retrieved_contexts": [sample.retrieved_context],
+                "reference": [sample.ground_truth],
             }
             
             dataset = Dataset.from_dict(dataset_dict)
             
-            # Run evaluation
+            # Run evaluation. RAGAS needs its own wrappers around LangChain
+            # objects; passing raw ones makes every metric fail per-sample and
+            # return NaN, which reads as a score of 0.0.
+            # context_recall needs a reference answer; without one it is not
+            # measurable, so don't spend judge calls producing a constant 0.
+            has_reference = bool((sample.ground_truth or "").strip())
+            _metrics = [faithfulness, answer_relevancy]
+            if has_reference:
+                _metrics.insert(1, context_recall)
+
             _eval_kwargs = {
-                "metrics": [faithfulness, context_recall, answer_relevancy],
-                "llm": self.evaluator_llm,
+                "metrics": _metrics,
+                "llm": self._build_ragas_llm(),
+                # Surface per-sample failures instead of silently scoring 0.0.
+                "raise_exceptions": True,
             }
             # Pin local embeddings so answer_relevancy never calls OpenAI.
             if getattr(self, "evaluator_embeddings", None) is not None:
-                _eval_kwargs["embeddings"] = self.evaluator_embeddings
+                from ragas.embeddings import LangchainEmbeddingsWrapper
+                _eval_kwargs["embeddings"] = LangchainEmbeddingsWrapper(
+                    self.evaluator_embeddings
+                )
             result = evaluate(dataset, **_eval_kwargs)
             
             eval_time_ms = (time.time() - start_time) * 1000
             
             # Extract scores
             metrics = EvaluationMetrics(
-                faithfulness=float(result["faithfulness"][0]) if "faithfulness" in result else 0.0,
-                context_recall=float(result["context_recall"][0]) if "context_recall" in result else 0.0,
-                answer_relevancy=float(result["answer_relevancy"][0]) if "answer_relevancy" in result else 0.0,
+                faithfulness=self._extract_score(result, "faithfulness"),
+                context_recall=(
+                    self._extract_score(result, "context_recall")
+                    if has_reference else None
+                ),
+                answer_relevancy=self._extract_score(result, "answer_relevancy"),
                 evaluation_time_ms=eval_time_ms,
                 model_used=self.eval_model,
             )
             
             eval_result = EvaluationResult(sample=sample, metrics=metrics)
+            self._persist_result(eval_result)
             self._publish_to_langfuse(sample, metrics)
             return eval_result
         
         except Exception as e:
             logger.error(f"Ragas evaluation failed: {e}. Using fallback.")
             return self._fallback_evaluate(sample)
+
+    def _persist_result(self, result: EvaluationResult) -> None:
+        """Persist an evaluation to SQLite. Failures are logged, never raised."""
+        try:
+            row_id = self.db.store_result(result)
+            logger.info("[RAGAS] result persisted (row id=%s)", row_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[RAGAS] could not persist evaluation result: %s", exc)
+
+    def _build_ragas_llm(self):
+        """Wrap the judge LLM for RAGAS, forcing single-shot completions.
+
+        RAGAS ensembles several completions per prompt (n>1) for
+        self-consistency, but Groq rejects that with
+        ``'n' : number must be at most 1``, which made every metric error out
+        and silently score 0.0.
+        """
+        # ragas.llms.LangchainLLMWrapper is a DeprecationHelper shim that
+        # cannot be subclassed; the real class lives in ragas.llms.base.
+        from ragas.llms.base import LangchainLLMWrapper
+
+        class _SingleShotLLM(LangchainLLMWrapper):
+            def generate_text(self, prompt, n=1, *args, **kwargs):  # noqa: D102
+                return super().generate_text(prompt, 1, *args, **kwargs)
+
+            async def agenerate_text(self, prompt, n=1, *args, **kwargs):  # noqa: D102
+                return await super().agenerate_text(prompt, 1, *args, **kwargs)
+
+        return _SingleShotLLM(self.evaluator_llm)
+
+    @staticmethod
+    def _extract_score(result: Any, name: str) -> float:
+        """Read one metric off a RAGAS result.
+
+        ``ragas.EvaluationResult`` defines ``__getitem__(str)`` but no
+        ``__contains__``, so ``name in result`` falls back to integer iteration
+        and raises ``KeyError: 0`` — which silently pushed every evaluation to
+        the heuristic fallback.
+        """
+        try:
+            value = result[name]
+        except Exception:  # noqa: BLE001  (metric absent for this run)
+            return 0.0
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else 0.0
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return score if score == score else 0.0  # drop NaN
     
     def _fallback_evaluate(self, sample: EvaluationSample) -> EvaluationResult:
         """Fallback evaluation using simple heuristics.
@@ -557,14 +662,19 @@ class RAGEvaluator:
         
         metrics = EvaluationMetrics(
             faithfulness=min(max(faithfulness_score, 0.0), 1.0),
-            context_recall=min(max(context_recall_score, 0.0), 1.0),
+            context_recall=(
+                min(max(context_recall_score, 0.0), 1.0)
+                if (sample.ground_truth or "").strip() else None
+            ),
             answer_relevancy=min(max(answer_relevancy_score, 0.0), 1.0),
             evaluation_time_ms=eval_time_ms,
             model_used="heuristic-fallback",
         )
         
         self._publish_to_langfuse(sample, metrics)
-        return EvaluationResult(sample=sample, metrics=metrics)
+        result = EvaluationResult(sample=sample, metrics=metrics)
+        self._persist_result(result)
+        return result
 
     def _publish_to_langfuse(
         self,
@@ -585,12 +695,35 @@ class RAGEvaluator:
             from app.observability.langfuse_client import score_current_trace, is_enabled
             if not is_enabled():
                 return
+            # The lexical fallback is word-overlap, not RAGAS. Publishing it
+            # under the RAGAS metric names made a degraded evaluator
+            # indistinguishable from a real one on the dashboard and produced
+            # the misleading "answer_relevancy = 0.0" readings. Namespace it so
+            # RAGAS charts only ever contain real RAGAS measurements.
+            is_fallback = (metrics.model_used or "").startswith("heuristic")
+            prefix = "heuristic_" if is_fallback else ""
+            if is_fallback:
+                logger.warning(
+                    "[RAGAS] evaluator degraded — publishing heuristic_* scores, "
+                    "NOT RAGAS metrics (model_used=%s)", metrics.model_used,
+                )
             score_map = {
-                "faithfulness": metrics.faithfulness,
-                "context_recall": metrics.context_recall,
-                "answer_relevancy": metrics.answer_relevancy,
-                "ragas_aggregate": metrics.aggregate_score,
+                f"{prefix}faithfulness": metrics.faithfulness,
+                f"{prefix}answer_relevancy": metrics.answer_relevancy,
+                f"{prefix}ragas_aggregate": metrics.aggregate_score,
             }
+            # context_recall measures how much of a REFERENCE answer the
+            # retrieved context covers. Live chat requests have no reference,
+            # so the metric is mathematically always 0 — publishing that would
+            # be a fabricated score, not a measurement. Abstain instead.
+            has_reference = bool((getattr(sample, "ground_truth", "") or "").strip())
+            if has_reference:
+                score_map[f"{prefix}context_recall"] = metrics.context_recall
+            else:
+                logger.info(
+                    "[RAGAS] context_recall abstained — no ground truth for this "
+                    "request (available only for offline dataset evaluation)"
+                )
             for name, value in score_map.items():
                 score_current_trace(
                     trace_id=trace_id,
@@ -599,10 +732,10 @@ class RAGEvaluator:
                     comment=f"model={metrics.model_used}",
                     data_type="NUMERIC",
                 )
-            logger.debug("[rag_evaluator] published %d scores to Langfuse trace %s",
-                         len(score_map), trace_id)
+            logger.info("[RAGAS] published %d scores to Langfuse trace %s",
+                        len(score_map), trace_id)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[rag_evaluator] Langfuse score publish skipped: %s", exc)
+            logger.warning("[RAGAS] Langfuse score publish failed: %s", exc)
     
     @staticmethod
     def _text_overlap(text1: str, text2: str) -> float:
