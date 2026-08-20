@@ -3,48 +3,223 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom global styles for CodeLens AI */
-html, body {
-  @apply h-full bg-dark-950 text-gray-100;
+/* ==========================================================================
+   CodeLens AI — design tokens
+   Warm-neutral surface scale, a single indigo accent (product brand colour),
+   and a shared spacing / radius scale consumed by every component.
+   ========================================================================== */
+
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --surface-app: #262624;
+  --surface-sidebar: #1f1e1d;
+  --surface-raised: #30302e;
+  --surface-overlay: #333331;
+  --surface-sunken: #1c1b1a;
+  --surface-hover: rgba(255, 255, 255, 0.055);
+  --surface-active: rgba(255, 255, 255, 0.09);
+
+  --border-subtle: rgba(255, 255, 255, 0.075);
+  --border-default: rgba(255, 255, 255, 0.13);
+  --border-strong: rgba(255, 255, 255, 0.22);
+
+  --text-primary: #f2f1ec;
+  --text-secondary: #c5c3b8;
+  --text-tertiary: #8b8980;
+  --text-faint: #6a6862;
+  --text-inverse: #1f1e1d;
+
+  --accent: #7b8cf5;
+  --accent-hover: #8e9cf8;
+  --accent-contrast: #12132a;
+  --accent-soft: rgba(123, 140, 245, 0.16);
+  --accent-border: rgba(123, 140, 245, 0.36);
+
+  --danger: #f0736b;
+  --danger-soft: rgba(240, 115, 107, 0.14);
+  --success: #5fc79a;
+  --success-soft: rgba(95, 199, 154, 0.14);
+  --warning: #e5b35c;
+  --warning-soft: rgba(229, 179, 92, 0.14);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.34);
+  --shadow-lg: 0 16px 44px rgba(0, 0, 0, 0.46);
+
+  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.24);
 }
 
-/* Scrollbar styling for dark theme */
-::-webkit-scrollbar {
-  @apply w-2 h-2;
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --surface-app: #faf9f5;
+  --surface-sidebar: #f0efe7;
+  --surface-raised: #ffffff;
+  --surface-overlay: #ffffff;
+  --surface-sunken: #f2f1ea;
+  --surface-hover: rgba(31, 30, 29, 0.05);
+  --surface-active: rgba(31, 30, 29, 0.085);
+
+  --border-subtle: rgba(31, 30, 29, 0.085);
+  --border-default: rgba(31, 30, 29, 0.145);
+  --border-strong: rgba(31, 30, 29, 0.26);
+
+  --text-primary: #1f1e1d;
+  --text-secondary: #3f3e3a;
+  --text-tertiary: #6f6d66;
+  --text-faint: #8d8b83;
+  --text-inverse: #faf9f5;
+
+  --accent: #5568d3;
+  --accent-hover: #4657ba;
+  --accent-contrast: #ffffff;
+  --accent-soft: rgba(85, 104, 211, 0.11);
+  --accent-border: rgba(85, 104, 211, 0.3);
+
+  --danger: #c0362f;
+  --danger-soft: rgba(192, 54, 47, 0.1);
+  --success: #1f7a55;
+  --success-soft: rgba(31, 122, 85, 0.1);
+  --warning: #96650c;
+  --warning-soft: rgba(150, 101, 12, 0.12);
+
+  --shadow-sm: 0 1px 2px rgba(31, 30, 29, 0.08);
+  --shadow-md: 0 4px 14px rgba(31, 30, 29, 0.09);
+  --shadow-lg: 0 16px 44px rgba(31, 30, 29, 0.14);
+
+  --scrollbar-thumb: rgba(31, 30, 29, 0.16);
+  --scrollbar-thumb-hover: rgba(31, 30, 29, 0.28);
 }
 
-::-webkit-scrollbar-track {
-  @apply bg-dark-800;
+:root {
+  /* Code blocks stay on a dark surface in both themes, for token contrast. */
+  --code-surface: #1b1a19;
+  --code-header: #232221;
+  --code-border: rgba(255, 255, 255, 0.09);
+  --code-text: #e8e6df;
+
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-display: ui-serif, Georgia, Cambria, 'Times New Roman', serif;
+  --font-mono: 'Fira Code', ui-monospace, SFMono-Regular, 'SF Mono', Menlo,
+    Consolas, monospace;
+
+  --content-width: 46rem;
+  --sidebar-width: 17rem;
+  --sidebar-rail: 3.5rem;
+  --header-height: 3.25rem;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
-::-webkit-scrollbar-thumb {
-  @apply bg-dark-600 rounded hover:bg-dark-500;
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Code block styling */
-code {
-  @apply bg-dark-800 px-2 py-1 rounded text-sm font-mono;
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
-pre {
-  @apply bg-dark-900 p-4 rounded-lg overflow-x-auto;
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
-/* Typography */
-h1, h2, h3, h4, h5, h6 {
-  @apply font-bold text-gray-100;
-}
-
-a {
-  @apply text-primary-500 hover:text-primary-600 transition-colors;
-}
-
-/* Button base styles */
 button {
-  @apply transition-colors duration-200;
+  font-family: inherit;
+  transition: background-color 0.15s var(--ease), color 0.15s var(--ease),
+    border-color 0.15s var(--ease), opacity 0.15s var(--ease);
 }
 
 button:disabled {
-  @apply opacity-50 cursor-not-allowed;
+  cursor: not-allowed;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ==========================================================================
+   Scrollbars
+   ========================================================================== */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius-pill);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 

@@ -1,7 +1,7 @@
 /**
- * AgentActivityComponent — Phase I
+ * AgentActivityComponent
  *
- * A collapsible side-panel that renders the live LangGraph traversal log:
+ * Inspector panel that renders the live LangGraph traversal log:
  * agent switches, tool calls, checkpoints, HIL interrupts, errors.
  *
  * Designed as a pure display component — receives `activities` from ChatComponent
@@ -111,11 +111,9 @@ import {
       display: flex;
       flex-direction: column;
       height: 100%;
-      background: #1a1f2e;
-      border-left: 1px solid #2d3748;
-      font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+      background: var(--surface-sidebar);
       font-size: 12px;
-      color: #e2e8f0;
+      color: var(--text-secondary);
     }
 
     /* ── Header ─────────────────────────────────────────────────── */
@@ -123,9 +121,9 @@ import {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 10px 14px;
-      border-bottom: 1px solid #2d3748;
-      background: #1e2534;
+      padding: 0 44px 0 16px;
+      height: var(--header-height);
+      border-bottom: 1px solid var(--border-subtle);
       flex-shrink: 0;
     }
 
@@ -134,13 +132,13 @@ import {
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      color: #94a3b8;
+      color: var(--text-tertiary);
     }
 
     .badge-count {
-      background: #374151;
-      color: #9ca3af;
-      border-radius: 10px;
+      background: var(--surface-active);
+      color: var(--text-tertiary);
+      border-radius: var(--radius-pill);
       padding: 1px 7px;
       font-size: 10px;
     }
@@ -150,19 +148,18 @@ import {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 6px 14px;
-      background: #111827;
-      border-bottom: 1px solid #1f2937;
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--border-subtle);
       flex-shrink: 0;
-      color: #667eea;
-      font-size: 11px;
+      color: var(--accent);
+      font-size: 11.5px;
     }
 
     .pulse-dot {
-      width: 8px;
-      height: 8px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
-      background: #667eea;
+      background: var(--accent);
       animation: pulse 1.4s ease-in-out infinite;
     }
 
@@ -173,42 +170,39 @@ import {
 
     /* ── Empty state ─────────────────────────────────────────────── */
     .empty-state {
-      padding: 24px 14px;
+      padding: 28px 20px;
       text-align: center;
-      color: #4b5563;
-      font-size: 11px;
+      color: var(--text-faint);
+      font-size: 12px;
+      line-height: 1.5;
     }
 
-    /* ── Activity list ───────────────────────────────────────────── */
+    /* ── Activity list ───────────────────────────────────── */
     .activity-list {
       flex: 1;
       overflow-y: auto;
       padding: 8px 0;
     }
 
-    .activity-list::-webkit-scrollbar { width: 4px; }
-    .activity-list::-webkit-scrollbar-track { background: transparent; }
-    .activity-list::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
-
     /* ── Entry ───────────────────────────────────────────────────── */
     .activity-entry {
       display: flex;
       align-items: flex-start;
       gap: 8px;
-      padding: 5px 14px;
+      padding: 6px 16px;
       border-left: 2px solid transparent;
-      transition: background 0.15s ease;
+      transition: background 0.15s var(--ease);
     }
 
     .activity-entry:hover {
-      background: rgba(255, 255, 255, 0.03);
+      background: var(--surface-hover);
     }
 
-    .entry-running  { border-left-color: #667eea; }
-    .entry-done     { border-left-color: #10b981; }
-    .entry-error    { border-left-color: #ef4444; }
-    .entry-agent-switch { background: rgba(102, 126, 234, 0.06); }
-    .entry-interrupt    { background: rgba(251, 191, 36, 0.07); }
+    .entry-running  { border-left-color: var(--accent); }
+    .entry-done     { border-left-color: var(--success); }
+    .entry-error    { border-left-color: var(--danger); }
+    .entry-agent-switch { background: var(--accent-soft); }
+    .entry-interrupt    { background: var(--warning-soft); }
 
     /* ── Entry icon ──────────────────────────────────────────────── */
     .entry-icon {
@@ -222,10 +216,10 @@ import {
     }
 
     .spinner {
-      width: 12px;
-      height: 12px;
-      border: 2px solid #374151;
-      border-top-color: #667eea;
+      width: 11px;
+      height: 11px;
+      border: 2px solid var(--border-default);
+      border-top-color: var(--accent);
       border-radius: 50%;
       animation: spin 0.7s linear infinite;
     }
@@ -234,8 +228,8 @@ import {
       to { transform: rotate(360deg); }
     }
 
-    .icon-done  { color: #10b981; font-size: 11px; font-weight: 700; }
-    .icon-error { color: #ef4444; font-size: 11px; font-weight: 700; }
+    .icon-done  { color: var(--success); font-size: 11px; font-weight: 700; }
+    .icon-error { color: var(--danger); font-size: 11px; font-weight: 700; }
 
     /* ── Entry content ───────────────────────────────────────────── */
     .entry-content {
@@ -247,16 +241,16 @@ import {
     }
 
     .entry-label {
-      color: #e2e8f0;
-      font-size: 11.5px;
-      line-height: 1.4;
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.45;
       word-break: break-word;
     }
 
     .duration-badge {
       display: inline-block;
-      background: #1f2937;
-      color: #6b7280;
+      background: var(--surface-active);
+      color: var(--text-faint);
       border-radius: 4px;
       padding: 0 5px;
       font-size: 10px;
@@ -264,15 +258,15 @@ import {
     }
 
     .tool-input {
-      background: #111827;
-      border: 1px solid #1f2937;
-      border-radius: 4px;
-      padding: 4px 6px;
+      background: var(--surface-sunken);
+      border: 1px solid var(--border-subtle);
+      border-radius: 5px;
+      padding: 5px 7px;
+      font-family: var(--font-mono);
       font-size: 10px;
-      color: #9ca3af;
+      color: var(--text-tertiary);
       overflow: hidden;
-      max-height: 60px;
-      text-overflow: ellipsis;
+      max-height: 64px;
       white-space: pre-wrap;
       word-break: break-all;
       margin: 2px 0 0;
@@ -281,20 +275,19 @@ import {
     .checkpoint-badge {
       display: inline-block;
       background: transparent;
-      border: 1px solid #374151;
-      border-radius: 4px;
-      padding: 1px 5px;
+      border: 1px solid var(--border-default);
+      border-radius: 5px;
+      padding: 1px 6px;
+      font-family: var(--font-mono);
       font-size: 10px;
-      color: #667eea;
+      color: var(--accent);
       cursor: pointer;
       align-self: flex-start;
-      transition: border-color 0.15s, background 0.15s;
-      font-family: inherit;
     }
 
     .checkpoint-badge:hover {
-      border-color: #667eea;
-      background: rgba(102, 126, 234, 0.08);
+      border-color: var(--accent-border);
+      background: var(--accent-soft);
     }
   `],
 })

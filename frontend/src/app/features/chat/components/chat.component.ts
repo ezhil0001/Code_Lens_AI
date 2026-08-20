@@ -1,27 +1,49 @@
-import { Component, OnInit, OnDestroy, ViewChild, ElementRef, AfterViewChecked, ChangeDetectorRef, ChangeDetectionStrategy } from '@angular/core';
+import {
+  AfterViewChecked,
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  ElementRef,
+  HostListener,
+  OnDestroy,
+  OnInit,
+  ViewChild,
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
-import { HttpClient, HttpClientModule } from '@angular/common/http';
+import { HttpClient } from '@angular/common/http';
+import { Router } from '@angular/router';
 import { Subscription } from 'rxjs';
-import { MarkdownViewerComponent } from '../../../shared/components/markdown-viewer/markdown-viewer.component';
-import { CitationBadgeComponent } from '../../../shared/components/citation-badge/citation-badge.component';
-import { AgentStreamService, AgentActivityEntry, HILInterruptPayload } from '../../../core/services/agent-stream.service';
-import { IngestService } from '../../../core/services/ingest.service';
-import { Message, Citation } from '../../../data/models/message.model';
+
+import { environment } from '../../../../environments/environment';
+import { Citation, Message } from '../../../data/models/message.model';
+import {
+  AgentActivityEntry,
+  AgentStreamService,
+  HILInterruptPayload,
+} from '../../../core/services/agent-stream.service';
+import { ConversationStoreService } from '../../../core/services/conversation-store.service';
+import { IconComponent } from '../../../shared/components/icon/icon.component';
+
 import { AgentActivityComponent } from './agent-activity.component';
 import { CheckpointTimelineComponent } from './checkpoint-timeline.component';
-import { environment } from '../../../../environments/environment';
+import { ChatComposerComponent } from './chat-composer.component';
+import { ChatMessageComponent } from './chat-message.component';
+import { ChatSidebarComponent } from './chat-sidebar.component';
+import { KnowledgePanelComponent } from './knowledge-panel.component';
+
+interface Suggestion {
+  icon: string;
+  label: string;
+  prompt: string;
+}
 
 /**
- * ChatComponent
- * Main UI for CodeLens_AI chat interface
- * 
- * Features:
- * - Message list with auto-scroll
- * - Input bar with send button
- * - Real-time streaming with visual feedback
- * - Citations display below streamed content
- * - Stop button during streaming
+ * ChatComponent — the CodeLens workspace shell.
+ *
+ * Owns the three-region layout (navigation, conversation, inspector panels),
+ * conversation lifecycle, and every subscription to the streaming service.
+ * All backend contracts are unchanged: v2 SSE stream, history, checkpoints,
+ * resume/replay/branch, and ingestion.
  */
 @Component({
   selector: 'app-chat',
@@ -29,1054 +51,715 @@ import { environment } from '../../../../environments/environment';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     CommonModule,
-    FormsModule,
-    HttpClientModule,
-    MarkdownViewerComponent,
-    CitationBadgeComponent,
+    IconComponent,
+    ChatSidebarComponent,
+    ChatMessageComponent,
+    ChatComposerComponent,
+    KnowledgePanelComponent,
     AgentActivityComponent,
     CheckpointTimelineComponent,
   ],
   template: `
-    <div class="chat-container">
-      <!-- Header -->
-      <div class="chat-header">
-        <h1>CodeLens AI</h1>
-        <p class="subtitle">Enterprise RAG for Your Codebase</p>
-        <div class="header-actions">
-          <button (click)="toggleActivityPanel()" class="header-icon-btn" title="Agent Activity"
-                  [class.active]="showActivityPanel">
-            ⚡ Activity
+    <div class="shell">
+      <app-chat-sidebar
+        [collapsed]="sidebarCollapsed && !isNarrow"
+        [drawerOpen]="drawerOpen"
+        [userLabel]="userLabel"
+        (toggleCollapsed)="toggleSidebar()"
+        (closeDrawer)="drawerOpen = false"
+        (newChat)="startNewChat()"
+        (select)="openConversation($event)"
+        (openKnowledge)="openKnowledge()"
+        (logout)="logout()"
+      ></app-chat-sidebar>
+
+      <div class="scrim" *ngIf="drawerOpen" (click)="drawerOpen = false"></div>
+
+      <main class="workspace">
+        <!-- ── Top bar ─────────────────────────────────────────── -->
+        <header class="topbar">
+          <button
+            class="icon-btn menu-btn"
+            type="button"
+            (click)="drawerOpen = true"
+            aria-label="Open navigation"
+          >
+            <app-icon name="panel-left" [size]="18"></app-icon>
           </button>
-          <button (click)="toggleTimeline()" class="header-icon-btn" title="Checkpoint Timeline"
-                  [class.active]="showTimeline">
-            ⏱ Timeline
-          </button>
-          <button (click)="toggleUploadPanel()" class="upload-toggle-btn" title="Upload documents">
-            📤 Upload
-          </button>
-        </div>
-      </div>
 
-      <!-- HIL Approval Banner -->
-      <div *ngIf="hilInterrupt" class="hil-banner">
-        <div class="hil-inner">
-          <div class="hil-icon">⚠️</div>
-          <div class="hil-body">
-            <div class="hil-title">Human Review Required</div>
-            <div class="hil-reason">{{ hilInterrupt.reason }}</div>
-            <div class="hil-actions">
-              <input
-                type="text"
-                [(ngModel)]="hilInput"
-                placeholder="Optional: add context or guidance…"
-                class="hil-input"
-              />
-              <button class="hil-approve-btn" (click)="onHILApprove()">✅ Approve</button>
-              <button class="hil-reject-btn" (click)="onHILReject()">❌ Reject</button>
-            </div>
-          </div>
-        </div>
-      </div>
+          <h1 class="title">{{ isEmpty ? '' : conversationTitle }}</h1>
 
-      <!-- Upload Panel -->
-      <div *ngIf="showUploadPanel" class="upload-panel">
-        <div class="upload-content">
-          <h3>📁 Ingest Documents</h3>
-          <p class="upload-help">Upload files or paste a URL to add to your knowledge base</p>
-          
-          <!-- File Upload -->
-          <div class="upload-section">
-            <label class="file-input-label" [class.drag-over]="isDragOver"
-                   (dragover)="onDragOver($event)" (dragleave)="onDragLeave()"
-                   (drop)="onDrop($event)">
-              <input type="file"
-                     multiple
-                     accept=".md,.txt,.pdf,.py,.ts,.js,.jsx,.tsx,.java,.cpp,.c,.h,.cc,.cxx,.go,.rs,.rb,.php,.cs,.swift,.kt,.scala,.r,.m,.sh,.bash,.yaml,.yml,.json,.toml,.xml,.html,.css,.scss,.sql"
-                     (change)="onFilesSelected($event)"
-                     [disabled]="isIngesting"
-                     class="file-input">
-              <span class="file-input-text">Click to select or drag &amp; drop files</span>
-            </label>
-            <p class="file-types">Code: <strong>.py .ts .js .jsx .tsx .java .cpp .c .go .rs .rb .php .cs .swift .kt .sh</strong> &nbsp;|&nbsp; Docs: <strong>.pdf .txt .md .yaml .json .toml .xml .html .css .scss .sql</strong></p>
-          </div>
-
-          <!-- OR Divider -->
-          <div class="divider">or</div>
-
-          <!-- URL Input -->
-          <div class="url-section">
-            <input type="url" 
-                   [(ngModel)]="uploadUrl" 
-                   placeholder="Paste a URL to ingest"
-                   [disabled]="isIngesting"
-                   class="url-input">
-            <button (click)="ingestUrl()" 
-                    [disabled]="!uploadUrl.trim() || isIngesting"
-                    class="ingest-btn">
-              {{ isIngesting ? 'Ingesting...' : 'Ingest URL' }}
+          <div class="topbar-actions">
+            <button
+              class="pill-btn"
+              type="button"
+              [class.on]="showActivityPanel"
+              (click)="toggleActivityPanel()"
+              title="Agent activity"
+            >
+              <app-icon name="activity" [size]="15"></app-icon>
+              <span class="pill-label">Activity</span>
+              <span class="pulse" *ngIf="isLoading"></span>
+            </button>
+            <button
+              class="pill-btn"
+              type="button"
+              [class.on]="showTimeline"
+              (click)="toggleTimeline()"
+              title="Checkpoint timeline"
+            >
+              <app-icon name="clock" [size]="15"></app-icon>
+              <span class="pill-label">Timeline</span>
             </button>
           </div>
+        </header>
 
-          <!-- Rejected-file warnings -->
-          <div *ngIf="rejectedFiles.length > 0" class="rejected-files">
-            <strong>⚠️ Rejected (not .md):</strong>
-            <ul>
-              <li *ngFor="let name of rejectedFiles">{{ name }}</li>
-            </ul>
-          </div>
+        <div class="body">
+          <section class="conversation" [class.is-empty]="isEmpty">
+            <!-- ── Empty state: greeting + centred composer ────── -->
+            <div class="hero" *ngIf="isEmpty">
+              <div class="hero-inner">
+                <h2 class="greeting">{{ greeting }}</h2>
+                <p class="greeting-sub">
+                  Ask anything about the code and documents in your workspace.
+                </p>
 
-          <!-- Status Message -->
-          <div *ngIf="ingestionStatus" class="ingestion-status" [class.success]="ingestionStatus.includes('✓')">
-            {{ ingestionStatus }}
-          </div>
+                <app-chat-composer
+                  #composer
+                  [value]="draft"
+                  [streaming]="isLoading"
+                  [agentHint]="agentHint"
+                  [hilEnabled]="hilEnabled"
+                  (valueChange)="draft = $event"
+                  (send)="sendMessage($event)"
+                  (stop)="stopStreaming()"
+                  (attach)="openKnowledge()"
+                  (agentHintChange)="agentHint = $event"
+                  (hilEnabledChange)="hilEnabled = $event"
+                ></app-chat-composer>
 
-          <!-- Close Button -->
-          <button (click)="showUploadPanel = false" class="close-upload-btn">✕ Close</button>
-        </div>
-      </div>
-
-      <!-- Main split layout: chat + side panels -->
-      <div class="main-split">
-        <!-- Messages Area -->
-        <div class="messages-area" #messagesContainer>
-        <div class="messages-list">
-          <!-- Empty State -->
-          <div *ngIf="messages.length === 0" class="empty-state">
-            <div class="empty-icon">💬</div>
-            <h2>Start a Conversation</h2>
-            <p>Ask me anything about your codebase</p>
-            <div class="example-queries">
-              <button *ngFor="let query of exampleQueries"
-                      class="example-btn"
-                      (click)="sendMessage(query)">
-                {{ query }}
-              </button>
-            </div>
-          </div>
-
-          <!-- Messages -->
-          <div *ngFor="let message of messages; let last = last; trackBy: trackByMessageId"
-               [class.message-row]="true"
-               [class.user]="message.role === 'user'"
-               [class.assistant]="message.role === 'assistant'">
-
-            <!-- User Message -->
-            <div *ngIf="message.role === 'user'" class="message user-message">
-              <div class="message-content">{{ message.content }}</div>
+                <div class="suggestions">
+                  <button
+                    *ngFor="let s of suggestions"
+                    type="button"
+                    class="suggestion"
+                    (click)="sendMessage(s.prompt)"
+                  >
+                    <app-icon [name]="s.icon" [size]="15"></app-icon>
+                    {{ s.label }}
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <!-- Assistant Message -->
-            <div *ngIf="message.role === 'assistant'" class="message assistant-message">
-              <div class="message-content">
-                <!-- During streaming: plain text avoids per-token markdown re-parse -->
-                <pre *ngIf="message.isStreaming" class="streaming-text">{{ message.content }}<span class="cursor">▌</span></pre>
+            <!-- ── Transcript ─────────────────────────────────── -->
+            <div
+              class="scroller"
+              #scroller
+              (scroll)="onScroll()"
+              *ngIf="!isEmpty"
+            >
+              <div class="transcript">
+                <app-chat-message
+                  *ngFor="let message of messages; trackBy: trackByMessageId"
+                  [message]="message"
+                  (retry)="retryLast()"
+                  (edit)="editMessage($event)"
+                ></app-chat-message>
+                <div class="tail"></div>
+              </div>
+            </div>
 
-                <!-- After streaming: full markdown with syntax highlighting -->
-                <app-markdown-viewer
-                  *ngIf="!message.isStreaming"
-                  [content]="message.content">
-                </app-markdown-viewer>
-
-                <!-- Streaming indicator (three dots below text while loading) -->
-                <div *ngIf="message.isStreaming && !message.content" class="streaming-indicator">
-                  <span class="dot"></span>
-                  <span class="dot"></span>
-                  <span class="dot"></span>
+            <!-- ── Docked composer ────────────────────────────── -->
+            <div class="dock" *ngIf="!isEmpty">
+              <div class="hil" *ngIf="hilInterrupt" role="alertdialog">
+                <div class="hil-head">
+                  <app-icon name="alert" [size]="16"></app-icon>
+                  <span>Review needed</span>
+                </div>
+                <p class="hil-reason">{{ hilInterrupt.reason }}</p>
+                <div class="hil-actions">
+                  <input
+                    type="text"
+                    [value]="hilInput"
+                    (input)="hilInput = $any($event.target).value"
+                    placeholder="Add guidance for the agent (optional)"
+                    aria-label="Reviewer guidance"
+                  />
+                  <button type="button" class="approve" (click)="onHILApprove()">
+                    Approve
+                  </button>
+                  <button type="button" class="reject" (click)="onHILReject()">
+                    Reject
+                  </button>
                 </div>
               </div>
 
-              <!-- Metadata -->
-              <div *ngIf="message.tokenCount" class="message-meta">
-                <span>🔤 {{ message.tokenCount }} tokens</span>
-                <span *ngIf="message.processingTimeMs">
-                  ⏱️ {{ message.processingTimeMs }}ms
-                </span>
-              </div>
-
-              <!-- Citations -->
-              <div *ngIf="showCitations && message.citations && message.citations.length > 0" class="citations">
-                <div class="citations-label">📚 Sources:</div>
-                <app-citation-badge
-                  *ngFor="let citation of message.citations"
-                  [citation]="citation">
-                </app-citation-badge>
-              </div>
+              <app-chat-composer
+                #composer
+                [value]="draft"
+                [streaming]="isLoading"
+                [agentHint]="agentHint"
+                [hilEnabled]="hilEnabled"
+                [showScrollToBottom]="!autoScroll"
+                (valueChange)="draft = $event"
+                (send)="sendMessage($event)"
+                (stop)="stopStreaming()"
+                (attach)="openKnowledge()"
+                (agentHintChange)="agentHint = $event"
+                (hilEnabledChange)="hilEnabled = $event"
+                (scrollToBottom)="jumpToBottom()"
+              ></app-chat-composer>
             </div>
+          </section>
 
-            <!-- Error Message -->
-            <div *ngIf="message.error" class="message error-message">
-              <div class="error-icon">⚠️</div>
-              <div class="error-content">
-                <strong>Error:</strong> {{ message.error }}
-              </div>
-            </div>
-          </div>
+          <!-- ── Inspector panels ───────────────────────────────── -->
+          <aside class="inspector" *ngIf="showActivityPanel || showTimeline">
+            <button
+              class="inspector-close"
+              type="button"
+              (click)="closeInspector()"
+              aria-label="Close panel"
+            >
+              <app-icon name="x" [size]="16"></app-icon>
+            </button>
+
+            <app-agent-activity
+              *ngIf="showActivityPanel"
+              [activities]="agentActivities"
+              [isStreaming]="isLoading"
+              (checkpointSelected)="onCheckpointBadgeClick($event)"
+            ></app-agent-activity>
+
+            <app-checkpoint-timeline
+              *ngIf="showTimeline"
+              [sessionId]="currentSessionId"
+              [visible]="showTimeline"
+              (replayRequested)="onReplayCheckpoint($event)"
+              (branchCreated)="onBranchCreated($event)"
+              (closed)="showTimeline = false"
+            ></app-checkpoint-timeline>
+          </aside>
         </div>
-      </div>
+      </main>
 
-        <!-- Agent Activity Side Panel -->
-        <div *ngIf="showActivityPanel" class="side-panel">
-          <app-agent-activity
-            [activities]="agentActivities"
-            [isStreaming]="isLoading"
-            (checkpointSelected)="onCheckpointBadgeClick($event)">
-          </app-agent-activity>
-        </div>
-
-        <!-- Checkpoint Timeline Side Panel -->
-        <div *ngIf="showTimeline" class="side-panel">
-          <app-checkpoint-timeline
-            [sessionId]="currentSessionId"
-            [visible]="showTimeline"
-            (replayRequested)="onReplayCheckpoint($event)"
-            (branchCreated)="onBranchCreated($event)"
-            (closed)="showTimeline = false">
-          </app-checkpoint-timeline>
-        </div>
-      </div><!-- end .main-split -->
-
-      <!-- Input Area -->
-      <div class="input-area">
-        <div class="input-row">
-          <textarea
-            [(ngModel)]="userInput"
-            (keydown.control.enter)="onEnterKey($event)"
-            (keydown.meta.enter)="onEnterKey($event)"
-            placeholder="Ask me about your code... (Ctrl+Enter to send)"
-            class="message-input"
-            [disabled]="isLoading"
-            rows="1">
-          </textarea>
-
-          <button
-            *ngIf="!isLoading"
-            (click)="sendMessage()"
-            [disabled]="!userInput.trim()"
-            class="send-btn">
-            Send
-          </button>
-
-          <button
-            *ngIf="isLoading"
-            (click)="stopStreaming()"
-            class="stop-btn">
-            Stop
-          </button>
-        </div>
-
-        <!-- Settings -->
-        <div class="settings-row">
-          <label>
-            <input type="checkbox" [(ngModel)]="useHybridSearch">
-            <span>Hybrid Search (BM25 + Vector)</span>
-          </label>
-          <label>
-            <input type="checkbox" [(ngModel)]="showCitations" checked>
-            <span>Show Citations</span>
-          </label>
-          <label>
-            <input type="checkbox" [(ngModel)]="hilEnabled">
-            <span>HIL Review</span>
-          </label>
-        </div>
-      </div>
+      <app-knowledge-panel
+        *ngIf="showKnowledge"
+        (close)="showKnowledge = false"
+      ></app-knowledge-panel>
     </div>
   `,
-  styles: [`
-    :host {
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      background: #0f1419;
-      color: #e0e0e0;
-      font-family: system-ui, -apple-system, sans-serif;
-    }
-
-    .chat-container {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      max-width: 900px;
-      margin: 0 auto;
-      width: 100%;
-      box-shadow: 0 0 30px rgba(0,0,0,0.8);
-    }
-
-    /* Header */
-    .chat-header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      padding: 24px;
-      text-align: center;
-      border-bottom: 1px solid #374151;
-    }
-
-    .chat-header h1 {
-      margin: 0;
-      font-size: 24px;
-      font-weight: 700;
-      color: white;
-    }
-
-    .subtitle {
-      margin: 6px 0 0;
-      font-size: 13px;
-      color: rgba(255,255,255,0.8);
-    }
-
-    .upload-toggle-btn {
-      position: absolute;
-      top: 24px;
-      right: 24px;
-      background: rgba(255,255,255,0.2);
-      border: 1px solid rgba(255,255,255,0.3);
-      color: white;
-      padding: 8px 16px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 12px;
-      transition: all 0.2s;
-    }
-
-    .upload-toggle-btn:hover {
-      background: rgba(255,255,255,0.3);
-      border-color: rgba(255,255,255,0.5);
-    }
-
-    /* Upload Panel */
-    .upload-panel {
-      background: #1f2937;
-      border-bottom: 2px solid #667eea;
-      padding: 24px;
-      animation: slideDown 0.3s ease-out;
-    }
-
-    @keyframes slideDown {
-      from {
-        opacity: 0;
-        transform: translateY(-20px);
+  styles: [
+    `
+      :host {
+        display: block;
+        height: 100dvh;
+        overflow: hidden;
       }
-      to {
-        opacity: 1;
-        transform: translateY(0);
+
+      .shell {
+        display: flex;
+        height: 100%;
+        background: var(--surface-app);
+        color: var(--text-primary);
       }
-    }
 
-    .upload-content {
-      max-width: 600px;
-      margin: 0 auto;
-    }
-
-    .upload-content h3 {
-      margin: 0 0 12px;
-      color: #e0e0e0;
-      font-size: 16px;
-    }
-
-    .upload-help {
-      margin: 0 0 20px;
-      color: #9ca3af;
-      font-size: 13px;
-    }
-
-    .upload-section {
-      margin-bottom: 20px;
-    }
-
-    .file-input-label {
-      display: block;
-      padding: 20px;
-      border: 2px dashed #667eea;
-      border-radius: 8px;
-      text-align: center;
-      cursor: pointer;
-      background: rgba(102, 126, 234, 0.05);
-      transition: all 0.2s;
-    }
-
-    .file-input-label:hover {
-      background: rgba(102, 126, 234, 0.1);
-      border-color: #5568d3;
-    }
-
-    .file-input {
-      display: none;
-    }
-
-    .file-input-text {
-      color: #667eea;
-      font-weight: 600;
-      font-size: 14px;
-    }
-
-    .file-types {
-      margin: 8px 0 0;
-      color: #6b7280;
-      font-size: 12px;
-    }
-
-    .divider {
-      text-align: center;
-      color: #6b7280;
-      margin: 20px 0;
-      position: relative;
-    }
-
-    .url-section {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 16px;
-    }
-
-    .url-input {
-      flex: 1;
-      background: #111827;
-      border: 1px solid #374151;
-      color: #e0e0e0;
-      padding: 10px 12px;
-      border-radius: 6px;
-      font-size: 13px;
-    }
-
-    .url-input:focus {
-      outline: none;
-      border-color: #667eea;
-      box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
-    }
-
-    .ingest-btn {
-      background: #667eea;
-      color: white;
-      border: none;
-      padding: 10px 20px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 600;
-      transition: all 0.2s;
-    }
-
-    .ingest-btn:hover:not(:disabled) {
-      background: #5568d3;
-    }
-
-    .ingest-btn:disabled {
-      background: #4b5563;
-      cursor: not-allowed;
-      opacity: 0.6;
-    }
-
-    .file-input-label.drag-over {
-      background: rgba(102, 126, 234, 0.18);
-      border-color: #5568d3;
-    }
-
-    .rejected-files {
-      padding: 10px 12px;
-      border-radius: 6px;
-      background: #451a03;
-      border: 1px solid #92400e;
-      color: #fde68a;
-      font-size: 12px;
-      margin-bottom: 10px;
-    }
-
-    .rejected-files strong {
-      display: block;
-      margin-bottom: 4px;
-    }
-
-    .rejected-files ul {
-      margin: 0;
-      padding-left: 16px;
-    }
-
-    .rejected-files li {
-      margin: 2px 0;
-      font-family: 'Fira Code', monospace;
-    }
-
-    .ingestion-status {
-      padding: 12px;
-      border-radius: 6px;
-      background: #7f1d1d;
-      color: #fecaca;
-      font-size: 13px;
-      margin-bottom: 12px;
-    }
-
-    .ingestion-status.success {
-      background: #15803d;
-      color: #86efac;
-    }
-
-    .close-upload-btn {
-      width: 100%;
-      background: #374151;
-      color: #e0e0e0;
-      border: none;
-      padding: 8px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 13px;
-      transition: all 0.2s;
-    }
-
-    .close-upload-btn:hover {
-      background: #4b5563;
-    }
-
-    /* Messages Area */
-    .messages-area {
-      flex: 1;
-      overflow-y: auto;
-      padding: 20px;
-      background: #0f1419;
-    }
-
-    .messages-list {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    /* Empty State */
-    .empty-state {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      color: #6b7280;
-      text-align: center;
-    }
-
-    .empty-icon {
-      font-size: 48px;
-      margin-bottom: 12px;
-    }
-
-    .empty-state h2 {
-      margin: 0;
-      color: #d1d5db;
-      font-size: 20px;
-    }
-
-    .empty-state p {
-      margin: 8px 0 20px;
-      font-size: 14px;
-    }
-
-    .example-queries {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      width: 100%;
-      max-width: 400px;
-    }
-
-    .example-btn {
-      background: #1f2937;
-      border: 1px solid #374151;
-      color: #9ca3af;
-      padding: 10px 14px;
-      border-radius: 6px;
-      cursor: pointer;
-      transition: all 0.2s;
-      font-size: 13px;
-      text-align: left;
-    }
-
-    .example-btn:hover {
-      background: #374151;
-      color: #d1d5db;
-      border-color: #4b5563;
-    }
-
-    /* Messages */
-    .message-row {
-      display: flex;
-      gap: 12px;
-      animation: slideIn 0.3s ease-out;
-    }
-
-    .message-row.user {
-      justify-content: flex-end;
-    }
-
-    @keyframes slideIn {
-      from {
-        opacity: 0;
-        transform: translateY(10px);
+      .scrim {
+        display: none;
       }
-      to {
-        opacity: 1;
-        transform: translateY(0);
+
+      .workspace {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        height: 100%;
       }
-    }
 
-    .message {
-      max-width: 70%;
-      padding: 12px 16px;
-      border-radius: 8px;
-      line-height: 1.5;
-    }
+      /* ── Top bar ─────────────────────────────────────────────── */
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: var(--header-height);
+        padding: 0 12px 0 16px;
+        flex-shrink: 0;
+        border-bottom: 1px solid transparent;
+      }
 
-    .user-message {
-      background: #667eea;
-      color: white;
-      border-bottom-right-radius: 0;
-    }
+      .title {
+        flex: 1;
+        min-width: 0;
+        margin: 0;
+        font-size: 14px;
+        font-weight: 550;
+        color: var(--text-secondary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
 
-    .assistant-message {
-      background: #1f2937;
-      border: 1px solid #374151;
-      border-bottom-left-radius: 0;
-    }
+      .icon-btn {
+        display: grid;
+        place-items: center;
+        width: 32px;
+        height: 32px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-tertiary);
+        cursor: pointer;
+      }
 
-    .error-message {
-      background: #7f1d1d;
-      border: 1px solid #991b1b;
-      border-radius: 8px;
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-    }
+      .icon-btn:hover {
+        background: var(--surface-hover);
+        color: var(--text-primary);
+      }
 
-    .error-icon {
-      font-size: 20px;
-      flex-shrink: 0;
-    }
+      .menu-btn {
+        display: none;
+      }
 
-    .error-content {
-      color: #fecaca;
-      font-size: 14px;
-    }
+      .topbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
 
-    /* Streaming */
-    .streaming-text {
-      font-family: system-ui, -apple-system, sans-serif;
-      font-size: 14px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      background: transparent;
-      border: none;
-      padding: 0;
-      margin: 0;
-      color: inherit;
-      line-height: 1.6;
-    }
+      .pill-btn {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        height: 32px;
+        padding: 0 11px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-pill);
+        background: transparent;
+        color: var(--text-tertiary);
+        font-size: 13px;
+        cursor: pointer;
+      }
 
-    .cursor {
-      display: inline-block;
-      animation: blink 1s step-end infinite;
-      color: #667eea;
-      margin-left: 1px;
-    }
+      .pill-btn:hover {
+        background: var(--surface-hover);
+        color: var(--text-primary);
+      }
 
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0; }
-    }
+      .pill-btn.on {
+        background: var(--surface-active);
+        border-color: var(--border-subtle);
+        color: var(--text-primary);
+      }
 
-    .streaming-indicator {
-      display: flex;
-      gap: 4px;
-      margin-top: 8px;
-    }
+      .pulse {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
 
-    .dot {
-      display: inline-block;
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: #667eea;
-      animation: pulse 1.4s infinite;
-    }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
 
-    .dot:nth-child(2) { animation-delay: 0.2s; }
-    .dot:nth-child(3) { animation-delay: 0.4s; }
+      /* ── Body ────────────────────────────────────────────────── */
+      .body {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
 
-    @keyframes pulse {
-      0%, 100% { opacity: 0.3; }
-      50% { opacity: 1; }
-    }
+      .conversation {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
 
-    /* Metadata & Citations */
-    .message-meta {
-      margin-top: 8px;
-      padding-top: 8px;
-      border-top: 1px solid #374151;
-      font-size: 12px;
-      color: #6b7280;
-      display: flex;
-      gap: 12px;
-    }
+      /* ── Empty state ─────────────────────────────────────────── */
+      .hero {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px 0 8vh;
+        overflow-y: auto;
+      }
 
-    .citations {
-      margin-top: 12px;
-      padding-top: 12px;
-      border-top: 1px solid #374151;
-    }
+      .hero-inner {
+        width: 100%;
+        max-width: var(--content-width);
+        margin: 0 auto;
+      }
 
-    .citations-label {
-      font-size: 12px;
-      color: #6b7280;
-      margin-bottom: 8px;
-    }
+      .greeting {
+        margin: 0;
+        padding: 0 20px;
+        font-family: var(--font-display);
+        font-size: clamp(28px, 4.6vw, 40px);
+        font-weight: 400;
+        letter-spacing: -0.02em;
+        line-height: 1.15;
+        color: var(--text-primary);
+        text-align: center;
+      }
 
-    /* Input Area */
-    .input-area {
-      background: #1f2937;
-      border-top: 1px solid #374151;
-      padding: 16px;
-      gap: 12px;
-    }
+      .greeting-sub {
+        margin: 10px 0 26px;
+        padding: 0 20px;
+        font-size: 15px;
+        color: var(--text-tertiary);
+        text-align: center;
+      }
 
-    .input-row {
-      display: flex;
-      gap: 8px;
-      align-items: flex-end;
-    }
+      .suggestions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        padding: 4px 20px 0;
+      }
 
-    .message-input {
-      flex: 1;
-      background: #111827;
-      border: 1px solid #374151;
-      color: #e0e0e0;
-      padding: 10px 12px;
-      border-radius: 6px;
-      font-size: 14px;
-      font-family: system-ui, -apple-system, sans-serif;
-      resize: none;
-      max-height: 200px;
-    }
+      .suggestion {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 7px 13px;
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-pill);
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 13.5px;
+        cursor: pointer;
+      }
 
-    .message-input:focus {
-      outline: none;
-      border-color: #667eea;
-      box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
-    }
+      .suggestion:hover {
+        background: var(--surface-hover);
+        border-color: var(--border-default);
+        color: var(--text-primary);
+      }
 
-    .message-input:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
+      /* ── Transcript ──────────────────────────────────────────── */
+      .scroller {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-anchor: none;
+      }
 
-    .send-btn, .stop-btn {
-      padding: 10px 20px;
-      background: #667eea;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 600;
-      transition: all 0.2s;
-    }
+      .transcript {
+        padding: 8px 0 0;
+      }
 
-    .send-btn:hover:not(:disabled) {
-      background: #5568d3;
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
-    }
+      .tail {
+        height: 40px;
+      }
 
-    .send-btn:disabled {
-      background: #4b5563;
-      cursor: not-allowed;
-      opacity: 0.6;
-    }
+      /* ── Dock ────────────────────────────────────────────────── */
+      .dock {
+        flex-shrink: 0;
+        padding-top: 6px;
+        background: linear-gradient(
+          to bottom,
+          transparent,
+          var(--surface-app) 26px
+        );
+      }
 
-    .stop-btn {
-      background: #ef4444;
-    }
+      /* ── HIL ─────────────────────────────────────────────────── */
+      .hil {
+        max-width: var(--content-width);
+        margin: 0 auto 10px;
+        padding: 12px 14px;
+        border: 1px solid var(--warning);
+        border-radius: var(--radius-md);
+        background: var(--warning-soft);
+      }
 
-    .stop-btn:hover {
-      background: #dc2626;
-    }
+      .hil-head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--warning);
+      }
 
-    /* Settings */
-    .settings-row {
-      display: flex;
-      gap: 20px;
-      margin-top: 12px;
-      font-size: 13px;
-      flex-wrap: wrap;
-    }
+      .hil-reason {
+        margin: 6px 0 10px;
+        font-size: 13.5px;
+        color: var(--text-secondary);
+      }
 
-    .settings-row label {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      cursor: pointer;
-      color: #9ca3af;
-    }
+      .hil-actions {
+        display: flex;
+        gap: 8px;
+      }
 
-    .settings-row input[type="checkbox"] {
-      width: 16px;
-      height: 16px;
-      cursor: pointer;
-    }
+      .hil-actions input {
+        flex: 1;
+        min-width: 0;
+        height: 34px;
+        padding: 0 11px;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        background: var(--surface-raised);
+        font-size: 13.5px;
+        outline: none;
+      }
 
-    /* ── Header actions ─────────────────────────────────────────── */
-    .header-actions {
-      position: absolute;
-      top: 16px;
-      right: 16px;
-      display: flex;
-      gap: 6px;
-    }
+      .hil-actions button {
+        height: 34px;
+        padding: 0 14px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        font-size: 13px;
+        font-weight: 550;
+        cursor: pointer;
+      }
 
-    .header-icon-btn {
-      background: rgba(255,255,255,0.12);
-      border: 1px solid rgba(255,255,255,0.2);
-      color: rgba(255,255,255,0.85);
-      padding: 5px 10px;
-      border-radius: 5px;
-      cursor: pointer;
-      font-size: 11px;
-      font-weight: 600;
-      transition: background 0.15s;
-    }
+      .approve {
+        background: var(--success-soft);
+        border-color: var(--success);
+        color: var(--success);
+      }
 
-    .header-icon-btn:hover,
-    .header-icon-btn.active {
-      background: rgba(255,255,255,0.22);
-      border-color: rgba(255,255,255,0.4);
-    }
+      .reject {
+        background: var(--danger-soft);
+        border-color: var(--danger);
+        color: var(--danger);
+      }
 
-    /* ── HIL banner ─────────────────────────────────────────────── */
-    .hil-banner {
-      background: #451a03;
-      border-bottom: 2px solid #fbbf24;
-      padding: 12px 20px;
-      flex-shrink: 0;
-      animation: slideDown 0.25s ease-out;
-    }
+      /* ── Inspector ───────────────────────────────────────────── */
+      .inspector {
+        position: relative;
+        width: 320px;
+        flex-shrink: 0;
+        border-left: 1px solid var(--border-subtle);
+        background: var(--surface-sidebar);
+        overflow: hidden;
+      }
 
-    .hil-inner {
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-      max-width: 900px;
-      margin: 0 auto;
-    }
+      .inspector-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 2;
+        display: grid;
+        place-items: center;
+        width: 26px;
+        height: 26px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-tertiary);
+        cursor: pointer;
+      }
 
-    .hil-icon {
-      font-size: 22px;
-      flex-shrink: 0;
-      padding-top: 2px;
-    }
+      .inspector-close:hover {
+        background: var(--surface-hover);
+        color: var(--text-primary);
+      }
 
-    .hil-body {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
+      /* ── Responsive ──────────────────────────────────────────── */
+      @media (max-width: 1180px) {
+        .inspector {
+          width: 288px;
+        }
+      }
 
-    .hil-title {
-      font-weight: 700;
-      color: #fbbf24;
-      font-size: 13px;
-    }
+      @media (max-width: 900px) {
+        .menu-btn {
+          display: grid;
+        }
 
-    .hil-reason {
-      color: #fde68a;
-      font-size: 12px;
-      line-height: 1.5;
-    }
+        .scrim {
+          display: block;
+          position: fixed;
+          inset: 0;
+          z-index: 55;
+          background: rgba(0, 0, 0, 0.4);
+        }
 
-    .hil-actions {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
+        .inspector {
+          position: fixed;
+          top: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 50;
+          width: min(88vw, 340px);
+          box-shadow: var(--shadow-lg);
+        }
 
-    .hil-input {
-      flex: 1;
-      min-width: 200px;
-      background: #1c1008;
-      border: 1px solid #92400e;
-      color: #fde68a;
-      padding: 6px 10px;
-      border-radius: 5px;
-      font-size: 12px;
-    }
+        .pill-label {
+          display: none;
+        }
 
-    .hil-input::placeholder { color: #78350f; }
-    .hil-input:focus { outline: none; border-color: #fbbf24; }
+        .pill-btn {
+          padding: 0 9px;
+        }
+      }
 
-    .hil-approve-btn,
-    .hil-reject-btn {
-      border: none;
-      border-radius: 5px;
-      padding: 6px 14px;
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: opacity 0.15s;
-    }
+      @media (max-width: 640px) {
+        .greeting-sub {
+          margin-bottom: 20px;
+          font-size: 14px;
+        }
 
-    .hil-approve-btn { background: #065f46; color: #6ee7b7; }
-    .hil-approve-btn:hover { opacity: 0.85; }
-    .hil-reject-btn  { background: #7f1d1d; color: #fca5a5; }
-    .hil-reject-btn:hover { opacity: 0.85; }
+        .hero {
+          padding-bottom: 4vh;
+        }
 
-    /* ── Main split layout ──────────────────────────────────────── */
-    .main-split {
-      flex: 1;
-      display: flex;
-      overflow: hidden;
-    }
+        .hil {
+          margin: 0 12px 10px;
+        }
 
-    .messages-area {
-      flex: 1;
-      overflow-y: auto;
-      padding: 20px;
-      background: #0f1419;
-    }
+        .hil-actions {
+          flex-wrap: wrap;
+        }
 
-    .side-panel {
-      width: 280px;
-      flex-shrink: 0;
-      overflow: hidden;
-      border-left: 1px solid #1f2937;
-    }
-  `]
+        .hil-actions input {
+          flex-basis: 100%;
+        }
+      }
+    `,
+  ],
 })
 export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
-  @ViewChild('messagesContainer') private messagesContainer!: ElementRef;
+  @ViewChild('scroller') private scroller?: ElementRef<HTMLElement>;
+  @ViewChild('composer') private composer?: ChatComposerComponent;
 
   messages: Message[] = [];
-  userInput: string = '';
+  draft = '';
   isLoading = false;
-  useHybridSearch = true;
-  showCitations = true;
+  agentHint: string | null = null;
   hilEnabled = false;
 
-  // HIL state
   hilInterrupt: HILInterruptPayload | null = null;
   hilInput = '';
 
-  // Side panels
+  sidebarCollapsed = false;
+  drawerOpen = false;
   showActivityPanel = false;
   showTimeline = false;
+  showKnowledge = false;
+
   agentActivities: AgentActivityEntry[] = [];
+  currentSessionId = '';
+  userLabel = 'You';
+  autoScroll = true;
+  /** Below this width the sidebar becomes an overlay drawer, never a rail. */
+  isNarrow = window.innerWidth <= 900;
 
-  // Session identity
-  currentSessionId: string = this._initSessionId();
-
-  // Document ingestion properties
-  showUploadPanel = false;
-  uploadUrl: string = '';
-  isIngesting = false;
-  isDragOver = false;
-  ingestionProgress = 0;
-  ingestionStatus: string = '';
-  rejectedFiles: string[] = [];
-
-  /** All supported code and document file types for ingestion. */
-  private static readonly ALLOWED_EXT = new Set([
-    '.md', '.txt', '.pdf',
-    '.py', '.ts', '.js', '.jsx', '.tsx',
-    '.java', '.cpp', '.c', '.h', '.cc', '.cxx',
-    '.go', '.rs', '.rb', '.php', '.cs', '.swift',
-    '.kt', '.scala', '.r', '.m',
-    '.sh', '.bash',
-    '.yaml', '.yml', '.json', '.toml', '.xml',
-    '.html', '.css', '.scss', '.sql',
-  ]);
-
-  exampleQueries = [
-    'How do I initialize the database?',
-    'Show me the authentication flow',
-    'What\'s the API endpoint for search?',
-    'Explain the vector search implementation'
+  readonly suggestions: Suggestion[] = [
+    {
+      icon: 'code',
+      label: 'Explain a module',
+      prompt: 'Walk me through the main modules in this codebase.',
+    },
+    {
+      icon: 'layers',
+      label: 'Map the architecture',
+      prompt: 'Describe the system architecture and how data flows through it.',
+    },
+    {
+      icon: 'bug',
+      label: 'Debug an error',
+      prompt: 'Help me trace the cause of a runtime error in this project.',
+    },
+    {
+      icon: 'book',
+      label: 'Find documentation',
+      prompt: 'What documentation exists for the ingestion pipeline?',
+    },
   ];
 
-  private shouldScroll = true;
+  private shouldScroll = false;
+  private lastUserMessage = '';
   private subs = new Subscription();
 
   constructor(
     private agentStreamService: AgentStreamService,
-    private ingestService: IngestService,
+    private conversations: ConversationStoreService,
     private cdr: ChangeDetectorRef,
     private http: HttpClient,
+    private router: Router,
   ) {}
 
-  /** Restore the persisted conversation so a refresh doesn't blank the chat. */
-  private _loadHistory(): void {
-    const token = localStorage.getItem('auth_token');
-    if (!token) return;
-    this.subs.add(
-      this.http
-        .get<{ messages: Array<{ role: string; content: string }> }>(
-          `${environment.apiUrl}/api/v2/chat/history/${this.currentSessionId}`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        )
-        .subscribe({
-          next: (res) => {
-            if (this.messages.length || !res?.messages?.length) return;
-            this.messages = res.messages.map((m, i) => ({
-              id: `hist-${i}`,
-              role: m.role === 'assistant' ? 'assistant' : 'user',
-              content: m.content,
-              timestamp: new Date(),
-            })) as Message[];
-            this.shouldScroll = true;
-            this.cdr.detectChanges();
-          },
-          error: (e) => console.warn('history recovery failed', e?.status ?? e),
-        }),
-    );
+  // ── Derived view state ───────────────────────────────────────────────────
+
+  get isEmpty(): boolean {
+    return this.messages.length === 0;
   }
 
-  ngOnInit() {
-    this._loadHistory();
-    // ── agent stream subscriptions ────────────────────────────────
+  get conversationTitle(): string {
+    return this.conversations.get(this.currentSessionId)?.title ?? 'New chat';
+  }
+
+  get greeting(): string {
+    const hour = new Date().getHours();
+    const part = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+    return `${part}, ${this.userLabel}`;
+  }
+
+  // ── Lifecycle ────────────────────────────────────────────────────────────
+
+  ngOnInit(): void {
+    this.userLabel = this._resolveUserLabel();
+    this.sidebarCollapsed = localStorage.getItem('codelens.sidebarCollapsed') === '1';
+
+    this.conversations.reloadForCurrentUser();
+    const active = this.conversations.activeId ?? this.conversations.conversations[0]?.id;
+    this.currentSessionId = active ?? this.conversations.createDraftId();
+    this.conversations.setActive(this.currentSessionId);
+
+    if (active) this._loadHistory(this.currentSessionId);
+
     this.subs.add(
       this.agentStreamService.fullMessage$.subscribe((text) => {
-        if (this.messages.length > 0) {
-          const lastIdx = this.messages.length - 1;
-          if (this.messages[lastIdx].role === 'assistant') {
-            // Mutate the last message content in-place to avoid replacing the
-            // array reference — trackBy keeps the same DOM node alive.
-            this.messages[lastIdx] = { ...this.messages[lastIdx], content: text };
-            this.shouldScroll = true;
-            this.cdr.detectChanges();
-          }
-        }
-      })
+        const lastIdx = this.messages.length - 1;
+        if (lastIdx < 0 || this.messages[lastIdx].role !== 'assistant') return;
+        // Replace the object (not the array) so trackBy keeps the DOM node.
+        this.messages[lastIdx] = { ...this.messages[lastIdx], content: text };
+        this.shouldScroll = this.autoScroll;
+        this.cdr.detectChanges();
+      }),
     );
 
     this.subs.add(
       this.agentStreamService.loading$.subscribe((loading) => {
         this.isLoading = loading;
-        if (!loading && this.messages.length > 0) {
-          const lastIdx = this.messages.length - 1;
-          if (this.messages[lastIdx].role === 'assistant') {
-            const updated = { ...this.messages[lastIdx], isStreaming: false };
-            this.messages = [...this.messages.slice(0, lastIdx), updated];
-          }
+        const lastIdx = this.messages.length - 1;
+        if (!loading && lastIdx >= 0 && this.messages[lastIdx].role === 'assistant') {
+          this.messages = [
+            ...this.messages.slice(0, lastIdx),
+            { ...this.messages[lastIdx], isStreaming: false },
+          ];
+          if (this.currentSessionId) this.conversations.touch(this.currentSessionId);
         }
         this.cdr.detectChanges();
-      })
+      }),
     );
 
     this.subs.add(
       this.agentStreamService.error$.subscribe((error) => {
-        if (error && this.messages.length > 0) {
-          const lastIdx = this.messages.length - 1;
-          const updated = { ...this.messages[lastIdx], error };
-          this.messages = [...this.messages.slice(0, lastIdx), updated];
-          this.cdr.detectChanges();
-        }
-      })
+        const lastIdx = this.messages.length - 1;
+        if (!error || lastIdx < 0) return;
+        this.messages = [
+          ...this.messages.slice(0, lastIdx),
+          { ...this.messages[lastIdx], error, isStreaming: false },
+        ];
+        this.cdr.detectChanges();
+      }),
     );
 
     this.subs.add(
       this.agentStreamService.sources$.subscribe((sources) => {
-        if (!sources.length || this.messages.length === 0) return;
         const lastIdx = this.messages.length - 1;
+        if (!sources.length || lastIdx < 0) return;
         if (this.messages[lastIdx].role !== 'assistant') return;
         const citations: Citation[] = sources.map((s) => ({
           sourceFile: s.file_path,
@@ -1091,14 +774,14 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
           { ...this.messages[lastIdx], citations },
         ];
         this.cdr.detectChanges();
-      })
+      }),
     );
 
     this.subs.add(
       this.agentStreamService.activity$.subscribe((activities) => {
         this.agentActivities = activities;
         this.cdr.detectChanges();
-      })
+      }),
     );
 
     this.subs.add(
@@ -1106,7 +789,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         this.hilInterrupt = hil;
         this.hilInput = '';
         this.cdr.detectChanges();
-      })
+      }),
     );
   }
 
@@ -1115,23 +798,154 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.agentStreamService.cancelStream();
   }
 
-  // ─── TrackBy ─────────────────────────────────────────────────────────────
-
-  trackByMessageId(_index: number, message: Message): string {
-    return message.id;
+  ngAfterViewChecked(): void {
+    if (this.shouldScroll) {
+      this.shouldScroll = false;
+      this._scrollToBottom();
+    }
   }
 
-  // ─── HIL handlers ────────────────────────────────────────────────────────
-
-  onHILApprove(): void {
-    this.agentStreamService.resolveHIL(true, this.hilInput);
+  @HostListener('window:resize')
+  onResize(): void {
+    const narrow = window.innerWidth <= 900;
+    if (narrow === this.isNarrow) return;
+    this.isNarrow = narrow;
+    if (!narrow) this.drawerOpen = false;
+    this.cdr.markForCheck();
   }
 
-  onHILReject(): void {
-    this.agentStreamService.resolveHIL(false, this.hilInput);
+  @HostListener('window:keydown', ['$event'])
+  onShortcut(event: KeyboardEvent): void {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      this.startNewChat();
+    }
+    if (event.key === 'Escape') {
+      this.drawerOpen = false;
+      this.showKnowledge = false;
+      this.cdr.markForCheck();
+    }
   }
 
-  // ─── Panel toggles ───────────────────────────────────────────────────────
+  // ── Conversation lifecycle ───────────────────────────────────────────────
+
+  startNewChat(): void {
+    this.agentStreamService.cancelStream();
+    this.currentSessionId = this.conversations.createDraftId();
+    this.conversations.setActive(this.currentSessionId);
+    this.messages = [];
+    this.agentActivities = [];
+    this.hilInterrupt = null;
+    this.draft = '';
+    this.autoScroll = true;
+    this.drawerOpen = false;
+    this.cdr.markForCheck();
+  }
+
+  openConversation(sessionId: string): void {
+    if (sessionId === this.currentSessionId) {
+      this.drawerOpen = false;
+      return;
+    }
+    this.agentStreamService.cancelStream();
+    this.currentSessionId = sessionId;
+    this.conversations.setActive(sessionId);
+    this.messages = [];
+    this.agentActivities = [];
+    this.hilInterrupt = null;
+    this.autoScroll = true;
+    this.drawerOpen = false;
+    this.cdr.markForCheck();
+    this._loadHistory(sessionId);
+  }
+
+  // ── Sending ──────────────────────────────────────────────────────────────
+
+  sendMessage(query: string): void {
+    const message = query.trim();
+    if (!message || this.isLoading) return;
+
+    this.lastUserMessage = message;
+    this.conversations.commit(this.currentSessionId, message);
+
+    this.messages = [
+      ...this.messages,
+      {
+        id: `u-${Date.now()}`,
+        role: 'user',
+        content: message,
+        timestamp: new Date(),
+      },
+      {
+        id: `a-${Date.now() + 1}`,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        isStreaming: true,
+      },
+    ];
+
+    this.draft = '';
+    this.autoScroll = true;
+    this.shouldScroll = true;
+    this.cdr.detectChanges();
+
+    this.agentStreamService.sendMessage(message, this.currentSessionId, {
+      agentHint: this.agentHint ?? undefined,
+      hilEnabled: this.hilEnabled,
+      hilThreshold: 0.5,
+    });
+  }
+
+  retryLast(): void {
+    if (!this.lastUserMessage || this.isLoading) return;
+    // Drop the failed/previous assistant turn before re-running the same query.
+    const lastIdx = this.messages.length - 1;
+    if (lastIdx >= 0 && this.messages[lastIdx].role === 'assistant') {
+      this.messages = this.messages.slice(0, lastIdx);
+    }
+    const query = this.lastUserMessage;
+    if (this.messages[this.messages.length - 1]?.role === 'user') {
+      this.messages = this.messages.slice(0, this.messages.length - 1);
+    }
+    this.sendMessage(query);
+  }
+
+  editMessage(content: string): void {
+    this.draft = content;
+    this.composer?.setValue(content);
+    this.composer?.focus();
+  }
+
+  stopStreaming(): void {
+    this.agentStreamService.cancelStream();
+  }
+
+  // ── Scroll management ────────────────────────────────────────────────────
+
+  onScroll(): void {
+    const el = this.scroller?.nativeElement;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const next = distance < 90;
+    if (next !== this.autoScroll) {
+      this.autoScroll = next;
+      this.cdr.markForCheck();
+    }
+  }
+
+  jumpToBottom(): void {
+    this.autoScroll = true;
+    const el = this.scroller?.nativeElement;
+    el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }
+
+  // ── Panels ───────────────────────────────────────────────────────────────
+
+  toggleSidebar(): void {
+    this.sidebarCollapsed = !this.sidebarCollapsed;
+    localStorage.setItem('codelens.sidebarCollapsed', this.sidebarCollapsed ? '1' : '0');
+  }
 
   toggleActivityPanel(): void {
     this.showActivityPanel = !this.showActivityPanel;
@@ -1143,7 +957,32 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     if (this.showTimeline) this.showActivityPanel = false;
   }
 
-  // ─── Checkpoint / replay / branch ────────────────────────────────────────
+  closeInspector(): void {
+    this.showActivityPanel = false;
+    this.showTimeline = false;
+  }
+
+  openKnowledge(): void {
+    this.showKnowledge = true;
+    this.drawerOpen = false;
+  }
+
+  logout(): void {
+    localStorage.removeItem('auth_token');
+    this.router.navigate(['/login']);
+  }
+
+  // ── HIL ──────────────────────────────────────────────────────────────────
+
+  onHILApprove(): void {
+    this.agentStreamService.resolveHIL(true, this.hilInput);
+  }
+
+  onHILReject(): void {
+    this.agentStreamService.resolveHIL(false, this.hilInput);
+  }
+
+  // ── Checkpoints ──────────────────────────────────────────────────────────
 
   onCheckpointBadgeClick(_checkpointId: string): void {
     this.showTimeline = true;
@@ -1151,230 +990,87 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   onReplayCheckpoint(checkpointId: string): void {
-    this._prepareAssistantPlaceholder();
+    this.messages = [
+      ...this.messages,
+      {
+        id: `a-${Date.now()}`,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        isStreaming: true,
+      },
+    ];
+    this.shouldScroll = true;
     this.agentStreamService.replayFromCheckpoint(this.currentSessionId, checkpointId);
   }
 
   onBranchCreated(branchSessionId: string): void {
-    // Switch to the new branch session
-    this.currentSessionId = branchSessionId;
-    localStorage.setItem('chat_session_id', branchSessionId);
-    this.messages = [];
-    this.agentActivities = [];
+    this.conversations.commit(
+      branchSessionId,
+      `Branch of ${this.conversationTitle}`,
+    );
+    this.openConversation(branchSessionId);
     this.showTimeline = false;
   }
 
-  /**
-   * Handle Ctrl/Cmd+Enter in the textarea. Plain Enter stays a newline.
-   */
-  onEnterKey(event: Event) {
-    event.preventDefault();
-    this.sendMessage();
+  trackByMessageId(_index: number, message: Message): string {
+    return message.id;
   }
 
-  /**
-   * Send user message and trigger streaming response
-   */
-  sendMessage(query?: string) {
-    const message = query || this.userInput.trim();
-    if (!message) return;
+  // ── Private ──────────────────────────────────────────────────────────────
 
-    // Add user message
-    this.messages.push({
-      id: Date.now().toString(),
-      role: 'user',
-      content: message,
-      timestamp: new Date()
-    });
+  /** Restores persisted turns so a refresh or switch doesn't blank the thread. */
+  private _loadHistory(sessionId: string): void {
+    const token = localStorage.getItem('auth_token');
+    if (!token) return;
 
-    // Clear input
-    this.userInput = '';
-    this.shouldScroll = true;
-
-    this._prepareAssistantPlaceholder();
-
-    this.agentStreamService.sendMessage(message, this.currentSessionId, {
-      hilEnabled: this.hilEnabled,
-      hilThreshold: 0.5,
-    });
+    this.subs.add(
+      this.http
+        .get<{ messages: Array<{ role: string; content: string }> }>(
+          `${environment.apiUrl}/api/v2/chat/history/${sessionId}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        )
+        .subscribe({
+          next: (res) => {
+            if (sessionId !== this.currentSessionId) return;
+            if (this.messages.length || !res?.messages?.length) return;
+            this.messages = res.messages.map((m, i) => ({
+              id: `hist-${i}`,
+              role: m.role === 'assistant' ? 'assistant' : 'user',
+              content: m.content,
+              timestamp: new Date(),
+            })) as Message[];
+            const lastUser = [...this.messages]
+              .reverse()
+              .find((m) => m.role === 'user');
+            this.lastUserMessage = lastUser?.content ?? '';
+            this.shouldScroll = true;
+            this.cdr.detectChanges();
+          },
+          error: (e) => console.warn('history recovery failed', e?.status ?? e),
+        }),
+    );
   }
 
-  /**
-   * Stop ongoing stream
-   */
-  stopStreaming() {
-    this.agentStreamService.cancelStream();
+  private _scrollToBottom(): void {
+    const el = this.scroller?.nativeElement;
+    if (el) el.scrollTop = el.scrollHeight;
   }
 
-  // ─── Private helpers ─────────────────────────────────────────────────────
-
-  private _prepareAssistantPlaceholder(): void {
-    const assistantMessage: Message = {
-      id: (Date.now() + 1).toString(),
-      role: 'assistant',
-      content: '',
-      timestamp: new Date(),
-      isStreaming: true,
-    };
-    this.messages.push(assistantMessage);
-  }
-
-  private _initSessionId(): string {
-    let sessionId = localStorage.getItem('chat_session_id');
-    if (!sessionId) {
-      sessionId = `session-${crypto.randomUUID()}`;
-      localStorage.setItem('chat_session_id', sessionId);
-    }
-    return sessionId;
-  }
-
-  /**
-   * Handle file upload
-   */
-  onFilesSelected(event: Event) {
-    const input = event.target as HTMLInputElement;
-    if (input.files && input.files.length > 0) {
-      this._processFiles(Array.from(input.files));
-      // Reset so the same file can be re-selected after rejection
-      input.value = '';
-    }
-  }
-
-  // ─── Drag-and-drop handlers ───────────────────────────────────────────────
-
-  onDragOver(event: DragEvent): void {
-    event.preventDefault();
-    event.stopPropagation();
-    this.isDragOver = true;
-  }
-
-  onDragLeave(): void {
-    this.isDragOver = false;
-  }
-
-  onDrop(event: DragEvent): void {
-    event.preventDefault();
-    event.stopPropagation();
-    this.isDragOver = false;
-    const files = event.dataTransfer ? Array.from(event.dataTransfer.files) : [];
-    if (files.length) this._processFiles(files);
-  }
-
-  // ─── Private: validate + split files before uploading ────────────────────
-
-  private _processFiles(files: File[]): void {
-    const allowed = ChatComponent.ALLOWED_EXT;
-    const valid: File[] = [];
-    const rejected: string[] = [];
-
-    for (const file of files) {
-      const ext = '.' + file.name.split('.').pop()!.toLowerCase();
-      if (allowed.has(ext)) {
-        valid.push(file);
-      } else {
-        rejected.push(`${file.name} (.${file.name.split('.').pop()} is not allowed)`);
-      }
-    }
-
-    this.rejectedFiles = rejected;
-    this.cdr.detectChanges();
-
-    if (valid.length === 0) {
-      this.ingestionStatus = '✗ No valid .md files selected.';
-      this.cdr.detectChanges();
-      return;
-    }
-
-    this.uploadFiles(valid);
-  }
-
-  /**
-   * Upload files to backend for ingestion
-   */
-  uploadFiles(files: File[]) {
-    if (files.length === 0) return;
-
-    this.isIngesting = true;
-    this.ingestionStatus = `Uploading ${files.length} .md file(s)…`;
-    this.cdr.detectChanges();
-
-    this.ingestService.uploadDocuments(files).subscribe({
-      next: (response) => {
-        const backendErrors: string[] = response?.errors ?? [];
-        if (backendErrors.length > 0) {
-          // Backend also rejected some files — surface them
-          this.rejectedFiles = [...this.rejectedFiles, ...backendErrors];
-        }
-        const accepted = response?.files_ingested ?? files.length;
-        this.ingestionStatus = `✓ Successfully ingested ${accepted} file(s)`;
-        this.isIngesting = false;
-        this.cdr.detectChanges();
-        setTimeout(() => {
-          this.showUploadPanel = false;
-          this.ingestionStatus = '';
-          this.rejectedFiles = [];
-          this.cdr.detectChanges();
-        }, 3000);
-      },
-      error: (error) => {
-        this.ingestionStatus = `✗ Upload failed: ${error.message}`;
-        this.isIngesting = false;
-        this.cdr.detectChanges();
-      }
-    });
-  }
-
-  /**
-   * Ingest content from URL
-   */
-  ingestUrl() {
-    if (!this.uploadUrl.trim()) return;
-
-    this.isIngesting = true;
-    this.ingestionStatus = 'Ingesting from URL...';
-
-    this.ingestService.ingestFromUrl(this.uploadUrl).subscribe({
-      next: (response) => {
-        this.ingestionStatus = '✓ Successfully ingested URL content';
-        this.uploadUrl = '';
-        this.isIngesting = false;
-        setTimeout(() => {
-          this.showUploadPanel = false;
-          this.ingestionStatus = '';
-        }, 2000);
-      },
-      error: (error) => {
-        this.ingestionStatus = `✗ Ingestion failed: ${error.message}`;
-        this.isIngesting = false;
-      }
-    });
-  }
-
-  /**
-   * Toggle upload panel
-   */
-  toggleUploadPanel() {
-    this.showUploadPanel = !this.showUploadPanel;
-    if (!this.showUploadPanel) {
-      this.ingestionStatus = '';
-      this.rejectedFiles = [];
-    }
-  }
-
-  /**
-   * Auto-scroll messages area
-   */
-  ngAfterViewChecked() {
-    if (this.shouldScroll) {
-      this.scrollToBottom();
-      this.shouldScroll = false;
-    }
-  }
-
-  private scrollToBottom() {
+  private _resolveUserLabel(): string {
+    const token = localStorage.getItem('auth_token');
+    if (!token) return 'there';
     try {
-      this.messagesContainer.nativeElement.scrollTop =
-        this.messagesContainer.nativeElement.scrollHeight;
-    } catch (err) { }
+      const payload = token.split('.')[1];
+      const claims = JSON.parse(
+        atob(payload.replace(/-/g, '+').replace(/_/g, '/')),
+      );
+      const email: string = claims?.email ?? claims?.sub ?? '';
+      const name = email.includes('@') ? email.split('@')[0] : email;
+      if (!name) return 'there';
+      return name.charAt(0).toUpperCase() + name.slice(1);
+    } catch {
+      return 'there';
+    }
   }
 }

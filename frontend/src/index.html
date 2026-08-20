@@ -7,7 +7,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="AI-powered code assistant with semantic search and citations">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
-  
+
+  <!-- Resolve the stored theme before first paint to avoid a colour flash. -->
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem('codelens.theme');
+        var theme = stored === 'light' || stored === 'dark'
+          ? stored
+          : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
+
   <!-- Prism.js for syntax highlighting -->
   <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
 </head>

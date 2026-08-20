@@ -13,12 +13,16 @@ import { ShortPathPipe } from '../../pipes/short-path.pipe';
   standalone: true,
   imports: [CommonModule, ShortPathPipe],
   template: `
-    <div class="citation-badge" 
-         [title]="'Source: ' + citation.sourceFile + ':' + citation.lineStart">
-      <span class="citation-icon">📄</span>
+    <div class="citation-badge"
+         [title]="'Source: ' + citation.sourceFile + (citation.lineStart ? ':' + citation.lineStart : '')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <path d="M14 2v6h6"/>
+      </svg>
       <span class="citation-file">{{ citation.sourceFile | shortPath }}</span>
       <span class="citation-lines" *ngIf="citation.lineStart">
-        ({{ citation.lineStart }}:{{ citation.lineEnd }})
+        {{ citation.lineStart }}–{{ citation.lineEnd }}
       </span>
       <span class="citation-score" *ngIf="citation.relevanceScore">
         {{ (citation.relevanceScore * 100).toFixed(0) }}%
@@ -26,51 +30,50 @@ import { ShortPathPipe } from '../../pipes/short-path.pipe';
     </div>
   `,
   styles: [`
+    :host { display: inline-flex; max-width: 100%; }
+
     .citation-badge {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      background: #1f2937;
-      border: 1px solid #374151;
-      border-radius: 6px;
-      padding: 6px 10px;
-      margin: 4px;
-      font-size: 0.85em;
-      color: #9ca3af;
-      cursor: pointer;
-      transition: all 0.2s;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      gap: 7px;
+      max-width: 100%;
+      padding: 5px 10px;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-pill);
+      background: var(--surface-raised);
+      color: var(--text-tertiary);
+      font-size: 12.5px;
+      line-height: 1.4;
+      cursor: default;
+      transition: border-color 0.15s var(--ease), color 0.15s var(--ease);
     }
 
     .citation-badge:hover {
-      background: #374151;
-      border-color: #4b5563;
-      color: #d1d5db;
-    }
-
-    .citation-icon {
-      font-size: 1em;
+      border-color: var(--border-strong);
+      color: var(--text-secondary);
     }
 
     .citation-file {
-      font-family: monospace;
-      color: #60a5fa;
-      font-weight: 500;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .citation-lines {
-      color: #9ca3af;
-      font-size: 0.9em;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-faint);
     }
 
     .citation-score {
-      background: #1e3a8a;
-      color: #60a5fa;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 0.8em;
+      padding: 1px 6px;
+      border-radius: var(--radius-pill);
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 11px;
       font-weight: 600;
     }
   `]
